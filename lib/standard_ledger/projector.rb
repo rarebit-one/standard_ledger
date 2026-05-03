@@ -1,4 +1,5 @@
 require "active_support/concern"
+require "active_support/core_ext/class/attribute"
 
 module StandardLedger
   # Adds the `projects_onto` DSL to an Entry class. Each `projects_onto`
@@ -56,11 +57,33 @@ module StandardLedger
       def projects_onto(target_association, mode:, via: nil, if: nil, lock: nil, permissive: false, **options, &block)
         guard = binding.local_variable_get(:if) # `if:` is a reserved keyword
 
+        if block && via
+          raise ArgumentError,
+                "projects_onto :#{target_association} got both a block and `via:`; the two forms are mutually exclusive"
+        end
+
+        unless block || via
+          raise ArgumentError,
+                "projects_onto :#{target_association} requires either a block of `on(:kind) { ... }` handlers or `via: ProjectorClass`"
+        end
+
+        if via && permissive
+          raise ArgumentError,
+                "projects_onto :#{target_association} got `permissive: true` with `via:`; " \
+                "`permissive:` is only meaningful with the block form, since the class form has " \
+                "no per-kind handlers and runs unconditionally"
+        end
+
         handlers = {}
         if block
           dsl = HandlerDsl.new
           dsl.instance_eval(&block)
           handlers = dsl.handlers
+
+          if handlers.empty?
+            raise ArgumentError,
+                  "projects_onto :#{target_association} block is empty; at least one `on(:kind) { ... }` handler is required"
+          end
         end
 
         definition = Definition.new(
@@ -77,11 +100,93 @@ module StandardLedger
         self.standard_ledger_projections = standard_ledger_projections + [ definition ]
         definition
       end
+
+      # Filter the registered projections by mode. Used by the per-mode
+      # strategy classes (`Modes::Inline`, `Modes::Async`, ...) to discover
+      # which projections they own for a given entry class.
+      #
+      # @param mode [Symbol] one of `:inline`, `:async`, `:sql`, `:trigger`,
+      #   `:matview`.
+      # @return [Array<Definition>] the matching definitions, in declared order.
+      def standard_ledger_projections_for(mode)
+        standard_ledger_projections.select { |definition| definition.mode == mode }
+      end
     end
 
     included do
       class_attribute :standard_ledger_projections, instance_writer: false
       self.standard_ledger_projections = []
+    end
+
+    # Apply a single projection definition to this entry. Resolves the
+    # target association, looks up the per-kind handler (or falls back to
+    # the projector class), and invokes it — optionally inside
+    # `target.with_lock` when `lock: :pessimistic` was declared.
+    #
+    # The mode strategies (`Modes::Inline`, `Modes::Async`, ...) call this
+    # method; hosts typically do not call it directly.
+    #
+    # @param definition [Definition] one of the entry class's registered
+    #   projections.
+    # @return [void]
+    # @raise [StandardLedger::Error] when the entry's kind column is nil.
+    # @raise [StandardLedger::UnhandledKind] when no handler matches and
+    #   `permissive: false`.
+    def apply_projection!(definition)
+      return if definition.guard && !instance_exec(&definition.guard)
+
+      target = public_send(definition.target_association)
+      return if target.nil?
+
+      if definition.projector_class
+        invoke_with_optional_lock(target, definition.lock) do
+          definition.projector_class.new.apply(target, self)
+        end
+        return
+      end
+
+      kind = resolve_kind!
+      handler = definition.handlers[kind.to_sym]
+
+      if handler.nil?
+        if definition.permissive
+          handler = definition.handlers[:_]
+          return if handler.nil?
+        else
+          raise UnhandledKind,
+                "#{self.class.name} has no handler for kind=#{kind.inspect} on projection :#{definition.target_association}"
+        end
+      end
+
+      invoke_with_optional_lock(target, definition.lock) do
+        handler.call(target, self)
+      end
+    end
+
+    private
+
+    def resolve_kind!
+      unless self.class.respond_to?(:standard_ledger_entry_config)
+        raise Error,
+              "#{self.class.name} includes Projector but not Entry; " \
+              "`ledger_entry` must be called before apply_projection! can dispatch"
+      end
+
+      kind_column = self.class.standard_ledger_entry_config&.[](:kind) || :kind
+      kind = public_send(kind_column)
+      if kind.nil?
+        raise Error,
+              "#{self.class.name} entry has nil kind (column #{kind_column.inspect}); cannot dispatch projection"
+      end
+      kind
+    end
+
+    def invoke_with_optional_lock(target, lock)
+      if lock == :pessimistic
+        target.with_lock { yield }
+      else
+        yield
+      end
     end
 
     # Internal collector for the block-DSL form. Captures `on(:kind)` calls
