@@ -23,6 +23,23 @@ project adheres to [Semantic Versioning](https://semver.org/).
 - `spec/dummy/` minimal Rails-free AR harness backed by SQLite
   `:memory:`, loaded from `spec/spec_helper.rb` so AR-backed integration
   tests can run without a host app.
+- `Projector#apply_projection!(definition)` — runtime evaluator that resolves
+  the target association, evaluates the optional `if:` guard against the
+  entry, looks up the per-kind handler (with `:_` wildcard fallback when
+  `permissive: true`), and invokes the handler or `via:` projector class.
+  Wraps the call in `target.with_lock { ... }` when `lock: :pessimistic`.
+  Skips silently when the target is `nil`; raises
+  `StandardLedger::UnhandledKind` when no handler matches and the projection
+  is non-permissive; raises `StandardLedger::Error` when the entry's kind
+  column is `nil`.
+- `Projector.standard_ledger_projections_for(mode)` — class-side filter that
+  returns the registered definitions whose `mode` matches the argument, for
+  the per-mode strategy classes (`Modes::Inline`, future `Modes::Async`,
+  ...) to discover which projections they own.
+- `projects_onto` registration validation: now raises `ArgumentError` when a
+  block and `via:` are both given (mutually exclusive), when the block is
+  empty (no `on(:kind)` calls), or when neither a block nor `via:` is
+  supplied.
 
 ## [0.1.0] — 2026-05-04
 
