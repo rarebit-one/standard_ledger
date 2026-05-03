@@ -67,6 +67,13 @@ module StandardLedger
                 "projects_onto :#{target_association} requires either a block of `on(:kind) { ... }` handlers or `via: ProjectorClass`"
         end
 
+        if via && permissive
+          raise ArgumentError,
+                "projects_onto :#{target_association} got `permissive: true` with `via:`; " \
+                "`permissive:` is only meaningful with the block form, since the class form has " \
+                "no per-kind handlers and runs unconditionally"
+        end
+
         handlers = {}
         if block
           dsl = HandlerDsl.new
@@ -159,7 +166,13 @@ module StandardLedger
     private
 
     def resolve_kind!
-      kind_column = self.class.standard_ledger_entry_config&.fetch(:kind, :kind) || :kind
+      unless self.class.respond_to?(:standard_ledger_entry_config)
+        raise Error,
+              "#{self.class.name} includes Projector but not Entry; " \
+              "`ledger_entry` must be called before apply_projection! can dispatch"
+      end
+
+      kind_column = self.class.standard_ledger_entry_config&.[](:kind) || :kind
       kind = public_send(kind_column)
       if kind.nil?
         raise Error,

@@ -86,6 +86,14 @@ RSpec.describe StandardLedger::Projector do
         entry_class.projects_onto :voucher_scheme, mode: :inline
       }.to raise_error(ArgumentError, /requires either a block .* or `via:/)
     end
+
+    it "raises ArgumentError when permissive: true is combined with via:" do
+      projector_class = Class.new(StandardLedger::Projection)
+
+      expect {
+        entry_class.projects_onto :order, mode: :async, via: projector_class, permissive: true
+      }.to raise_error(ArgumentError, /permissive:.*only meaningful with the block form/)
+    end
   end
 
   describe "#apply_projection!" do
@@ -104,6 +112,19 @@ RSpec.describe StandardLedger::Projector do
 
       expect(target.granted).to eq(1)
       expect(target.redeemed).to eq(0)
+    end
+
+    it "dispatches correctly when kind is a String (as returned from a database column)" do
+      entry_class.projects_onto :voucher_scheme, mode: :inline do
+        on(:grant) { |s, _| s.granted += 1 }
+      end
+
+      entry = entry_class.new(action: "grant", voucher_scheme: target)
+      definition = entry_class.standard_ledger_projections.first
+
+      entry.apply_projection!(definition)
+
+      expect(target.granted).to eq(1)
     end
 
     it "raises UnhandledKind for unknown kinds when permissive: false" do
@@ -199,6 +220,22 @@ RSpec.describe StandardLedger::Projector do
       expect {
         entry.apply_projection!(definition)
       }.to raise_error(StandardLedger::Error, /nil kind/)
+    end
+
+    it "raises StandardLedger::Error when the class includes Projector but not Entry" do
+      projector_only_class = Class.new do
+        include StandardLedger::Projector
+        attr_accessor :voucher_scheme, :kind
+        def self.name = "ProjectorOnlyEntry"
+        def initialize(kind:, voucher_scheme:); @kind = kind; @voucher_scheme = voucher_scheme; end
+      end
+      projector_only_class.projects_onto(:voucher_scheme, mode: :inline) { on(:grant) { |s, _| s.granted += 1 } }
+
+      entry = projector_only_class.new(kind: :grant, voucher_scheme: target)
+      definition = projector_only_class.standard_ledger_projections.first
+
+      expect { entry.apply_projection!(definition) }
+        .to raise_error(StandardLedger::Error, /Entry/)
     end
 
     it "calls the projector class's apply(target, entry) when class form" do
