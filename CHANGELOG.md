@@ -40,6 +40,42 @@ project adheres to [Semantic Versioning](https://semver.org/).
   block and `via:` are both given (mutually exclusive), when the block is
   empty (no `on(:kind)` calls), or when neither a block nor `via:` is
   supplied.
+- `StandardLedger::Modes::Inline` runtime: applies inline-mode projections
+  inside `after_create`, transactional with the entry insert. A single
+  `after_create` callback is installed once per entry class on first
+  `:inline` registration (`Modes::Inline.install!`), and dispatches to
+  every `:inline` definition via `entry.apply_projection!`. Multiple
+  projections targeting the same association coalesce into a single
+  UPDATE per (entry, target): handlers run in declared order, then
+  `target.save!` persists the accumulated in-memory mutations once.
+- `StandardLedger.post(EntryClass, kind:, targets:, attrs:)` module API —
+  sugar over `EntryClass.create!` that maps `targets:` onto the entry's
+  `belongs_to` setters via `reflect_on_association`. Returns a
+  `StandardLedger::Result` (or the host's Result type when
+  `Config#custom_result?` is true). Wraps `ActiveRecord::RecordInvalid`
+  into `Result.failure(errors:)`; lets every other exception propagate so
+  the entry's transaction rolls back.
+- ActiveSupport::Notifications instrumentation under the configured
+  `notification_namespace` prefix (default `"standard_ledger"`):
+  - `<prefix>.entry.created` — `after_commit on: :create`. Payload
+    `{ entry:, kind:, targets: { name => target } }`. Targets are
+    discovered from the entry's non-polymorphic `belongs_to` reflections.
+  - `<prefix>.projection.applied` — fired per inline projection on
+    success. Payload `{ entry:, target:, projection:, mode: :inline,
+    duration_ms: }`.
+  - `<prefix>.projection.failed` — fired per inline projection on raise,
+    before re-raising so the entry's transaction rolls back. Payload
+    `{ entry:, target:, projection:, error: }`.
+- Host Result interop in `StandardLedger.post`: when both
+  `config.result_class` and `config.result_adapter` are set, the adapter
+  is invoked with `success:, value:, errors:, entry:, idempotent:,
+  projections:` and its return value is returned as-is. Falls back to
+  `StandardLedger::Result` otherwise.
+- Integration spec (`spec/standard_ledger/inline_integration_spec.rb`)
+  exercising the end-to-end flow against the `spec/dummy/` SQLite
+  harness: multi-target fan-out, transactional rollback on projector
+  raise, idempotent-retry projection skip, all three notifications,
+  `lock: :pessimistic`, multi-counter coalescing, and Result interop.
 
 ## [0.1.0] — 2026-05-04
 
@@ -75,16 +111,13 @@ roadmap.
 - GitHub Actions CI on Ruby 3.4.4 running RSpec + RuboCop.
 
 ### Pending (tracked in design doc, lands in subsequent PRs)
-- `StandardLedger.post(EntryClass, ...)` module API.
 - `StandardLedger.rebuild!(EntryClass, target:)` log-replay path.
 - `StandardLedger.refresh!(:view_name)` ad-hoc matview refresh.
-- Mode implementations: `:async` (`ProjectionJob` + `with_lock`), `:sql`
-  (recompute via `update_all`), `:trigger` (host-owned, gem records rebuild
-  SQL), `:matview` (`MatviewRefreshJob` + ad-hoc refresh).
+- Remaining mode implementations: `:async` (`ProjectionJob` + `with_lock`),
+  `:sql` (recompute via `update_all`), `:trigger` (host-owned, gem
+  records rebuild SQL), `:matview` (`MatviewRefreshJob` + ad-hoc refresh).
 - `standard_ledger:doctor` rake task (verifies trigger presence, etc.).
 - Install generator (`rails g standard_ledger:install`).
-- ActiveSupport::Notifications instrumentation (`entry.created`,
-  `projection.applied`, `projection.failed`).
 - RSpec helpers: `post_ledger_entry` matcher, `with_modes` block, opt-in
   `require "standard_ledger/rspec"` auto-cleanup.
 

@@ -38,11 +38,11 @@ standard_ledger/
 │   ├── projector.rb      # `include StandardLedger::Projector` concern + `projects_onto` DSL
 │   ├── projection.rb     # Base class for class-form projectors
 │   └── modes/
-│       └── inline.rb     # First mode strategy (skeleton; #call NotImplementedError)
+│       └── inline.rb     # `:inline` mode runtime — installs `after_create`, applies projections, coalesces multi-counter writes
 └── spec/                 # RSpec tests
 ```
 
-The other modes (`async`, `sql`, `trigger`, `matview`), the `StandardLedger.post` / `.rebuild!` / `.refresh!` API, and the install generator land in subsequent PRs — see `CHANGELOG.md` "Pending" for the complete list.
+The remaining modes (`async`, `sql`, `trigger`, `matview`), the `.rebuild!` / `.refresh!` APIs, and the install generator land in subsequent PRs — see `CHANGELOG.md` "Pending" for the complete list. `StandardLedger.post(EntryClass, kind:, targets:, attrs:)` ships in the same PR as the inline runtime.
 
 ## Key Patterns
 
@@ -116,16 +116,14 @@ A single host operation typically writes one of each, in one transaction. Neithe
 
 ## Test Strategy
 
-Specs are colocated by topic (`spec/standard_ledger/<topic>_spec.rb`). The current suite is small because most runtime is pending — focus is on the surfaces that exist (`Config`, `Result`, `Version`, `configure`/`reset!`).
+Specs are colocated by topic (`spec/standard_ledger/<topic>_spec.rb`). End-to-end coverage of the inline runtime lives in `spec/standard_ledger/inline_integration_spec.rb`, which exercises `StandardLedger.post` against the `spec/dummy/` SQLite harness — multi-target fan-out, transactional rollback, idempotent retry, all three notifications, `lock: :pessimistic`, multi-counter coalescing, and Result interop. The base of unit specs (`Config`, `Result`, `Entry`, `Projector`) covers the lower-level surfaces in isolation.
 
 Future spec coverage (lands with the corresponding PRs):
 
-- Each mode's transactional semantics (inline/sql/trigger roll back; async/matview don't)
-- Multi-target fan-out — declared-order execution for inline, per-projection failure isolation for async
+- `:async` mode transactional semantics (jobs enqueue at `after_create_commit`, with `with_lock` inside the job)
+- `:sql`/`:trigger`/`:matview` modes
 - `Projection.rebuild!` against synthetic logs
-- Idempotency contract — boot-time index validation, `RecordNotUnique` rescue returns existing row
 - `:trigger` mode `doctor` rake task; `:matview` mode `CONCURRENTLY` refresh
-- Result interop — host adapter is invoked when configured; default Result otherwise
 
 ## Conventions
 

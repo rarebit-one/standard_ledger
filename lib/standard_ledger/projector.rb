@@ -98,7 +98,23 @@ module StandardLedger
         )
 
         self.standard_ledger_projections = standard_ledger_projections + [ definition ]
+        install_mode_callbacks_for(definition)
         definition
+      end
+
+      # Delegate per-mode callback installation to the matching strategy
+      # class. Keeps `Modes::*` from reaching into `Projector`'s internals
+      # — each strategy gets a chance to wire up `after_create`,
+      # `after_create_commit`, or whatever lifecycle hook it needs the first
+      # time a projection of its mode is registered on this class.
+      #
+      # @param definition [Definition]
+      # @return [void]
+      def install_mode_callbacks_for(definition)
+        case definition.mode
+        when :inline
+          StandardLedger::Modes::Inline.install!(self)
+        end
       end
 
       # Filter the registered projections by mode. Used by the per-mode

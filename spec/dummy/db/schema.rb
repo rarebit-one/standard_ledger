@@ -96,4 +96,41 @@ ActiveRecord::Schema.define do
             :external_ref,
             unique: true,
             name: "index_extra_unique_entries_on_external_ref"
+
+  # ---------------------------------------------------------------------------
+  # Tables exercised by spec/standard_ledger/inline_integration_spec.rb.
+  #
+  # Two projection-target tables (voucher_schemes, customer_profiles), each
+  # with a counter the inline projection increments. The voucher_records
+  # table is the entry, with belongs_to FKs to both targets and the
+  # idempotency unique index expected by `Entry`.
+  # ---------------------------------------------------------------------------
+
+  create_table :voucher_schemes, force: true do |t|
+    t.string  :name, null: false
+    t.integer :granted_vouchers_count, null: false, default: 0
+    t.integer :redeemed_vouchers_count, null: false, default: 0
+    t.timestamps
+  end
+
+  create_table :customer_profiles, force: true do |t|
+    t.string  :name, null: false
+    t.integer :granted_vouchers_count, null: false, default: 0
+    t.integer :redeemed_vouchers_count, null: false, default: 0
+    t.timestamps
+  end
+
+  create_table :voucher_records, force: true do |t|
+    t.string  :organisation_id, null: false
+    t.string  :action, null: false
+    t.string  :serial_no, null: false
+    t.integer :voucher_scheme_id
+    t.integer :customer_profile_id
+    t.timestamps
+  end
+
+  add_index :voucher_records,
+            %i[organisation_id serial_no],
+            unique: true,
+            name: "index_voucher_records_on_org_and_serial"
 end
