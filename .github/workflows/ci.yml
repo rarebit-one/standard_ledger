@@ -1,31 +1,20 @@
 name: CI
 
 on:
+  pull_request:
   push:
     branches: [ main ]
-  pull_request:
+  workflow_call:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        ruby: [ "3.4.4" ]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: ${{ matrix.ruby }}
-          bundler-cache: true
-
-      - name: Run RSpec
-        run: bundle exec rspec
-
-      - name: Run RuboCop
-        run: bundle exec rubocop --format github
+  ci:
+    uses: rarebit-one/.github/.github/workflows/reusable-gem-ci.yml@v1
+    with:
+      ruby-versions: '["4.0.0","4.0.1","4.0.2","4.0.3"]'
+      extra-lint-commands: |
+        bundle exec brakeman --no-pager --force
+        bundle exec bundler-audit --update

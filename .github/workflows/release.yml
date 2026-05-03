@@ -1,0 +1,16 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    uses: rarebit-one/.github/.github/workflows/reusable-gem-release.yml@v1
+    with:
+      gem-name: standard_ledger
+      ruby-version: "4.0.1"
+    permissions:
+      contents: write
+      id-token: write
