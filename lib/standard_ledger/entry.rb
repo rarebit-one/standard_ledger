@@ -202,6 +202,17 @@ module StandardLedger
     # `StandardLedger.post`'s telemetry. Skips polymorphic and missing
     # associations so the payload only includes what's actually present.
     #
+    # Performance trade-off: this fires from `after_commit`, where AR may
+    # have cleared the association cache. Each `public_send(reflection.name)`
+    # can therefore issue a SELECT to reload the cached target. For the
+    # typical 1–2 belongs_to entry, that's negligible. If profiling on a
+    # high-cardinality entry shows this matters, capture targets earlier
+    # (e.g. in `before_create`) and stash them on the instance — deferred
+    # to a future PR. Notably, an inline-mode caller has already resolved
+    # these targets by the time `after_commit` runs, so the SELECTs would
+    # only happen for entries with belongs_to associations that are *not*
+    # registered as projection targets.
+    #
     # @return [Hash{Symbol => ActiveRecord::Base}]
     def standard_ledger_targets
       return {} unless self.class.respond_to?(:reflect_on_all_associations)

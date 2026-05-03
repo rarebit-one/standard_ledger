@@ -48,13 +48,28 @@ project adheres to [Semantic Versioning](https://semver.org/).
   projections targeting the same association coalesce into a single
   UPDATE per (entry, target): handlers run in declared order, then
   `target.save!` persists the accumulated in-memory mutations once.
+  When any projection in a per-target group declares `lock: :pessimistic`,
+  the entire apply-then-save cycle is wrapped in `target.with_lock`, so
+  the row lock spans both handler invocation and the coalesced save —
+  closing the lost-update window that an inner-only lock would leave open
+  between lock release and save. Lock interpretation is the mode's
+  responsibility; `Projector#apply_projection!` no longer wraps in
+  `with_lock` itself. `:inline` mode now refuses to install on a non-AR
+  entry class — `Modes::Inline.install!` raises `ArgumentError` instead
+  of silently no-op-ing.
 - `StandardLedger.post(EntryClass, kind:, targets:, attrs:)` module API —
   sugar over `EntryClass.create!` that maps `targets:` onto the entry's
   `belongs_to` setters via `reflect_on_association`. Returns a
   `StandardLedger::Result` (or the host's Result type when
   `Config#custom_result?` is true). Wraps `ActiveRecord::RecordInvalid`
   into `Result.failure(errors:)`; lets every other exception propagate so
-  the entry's transaction rolls back.
+  the entry's transaction rolls back. `targets:` accepts model instances
+  only; pass foreign keys via `attrs:` (e.g. `voucher_scheme_id: 42`)
+  when an instance isn't on hand. `result.projections[:inline]` reflects
+  the projections that *actually* ran for this entry — projections
+  short-circuited by an `if:` guard, a nil target, or a permissive
+  no-handler miss are excluded, and an idempotent retry returns
+  `[]` (no projections fire on the rescue path).
 - ActiveSupport::Notifications instrumentation under the configured
   `notification_namespace` prefix (default `"standard_ledger"`):
   - `<prefix>.entry.created` — `after_commit on: :create`. Payload

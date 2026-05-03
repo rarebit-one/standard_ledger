@@ -24,6 +24,16 @@ module StandardLedger
     # Definitions targeting different associations get their own
     # apply-then-save cycle, executed in the order the projections were
     # declared.
+    #
+    # ## Lock semantics
+    #
+    # When any projection in a per-target group declares `lock: :pessimistic`,
+    # the strategy wraps the **entire** apply-then-save cycle for that target
+    # in `target.with_lock { ... }`. The lock spans both handler invocation
+    # and the coalesced `save!`, so concurrent posts to the same target
+    # serialize end-to-end — closing the lost-update window that an
+    # inner-only lock would leave open between the lock release and the save.
+    # See `standard_ledger-design.md` §5.3.1.
     class Inline
       # Install the `after_create` callback on `entry_class` exactly once.
       # Subsequent calls (e.g. when a second `:inline` projection is added
@@ -32,9 +42,20 @@ module StandardLedger
       #
       # @param entry_class [Class] the host entry class.
       # @return [void]
+      # @raise [ArgumentError] when `entry_class` is not ActiveRecord-backed
+      #   (no `after_create` hook available). `:inline` mode requires AR
+      #   transactional callbacks; non-AR entry classes must use a different
+      #   mode (or refrain from declaring `:inline` projections).
       def self.install!(entry_class)
         return if entry_class.instance_variable_get(:@_standard_ledger_inline_installed)
-        return unless entry_class.respond_to?(:after_create)
+
+        unless entry_class.respond_to?(:after_create)
+          raise ArgumentError,
+                "#{entry_class.name || entry_class.inspect} cannot use mode: :inline " \
+                "because it does not respond to `after_create`. `:inline` mode requires " \
+                "an ActiveRecord-backed entry class — use `:async` (or another mode) for " \
+                "non-AR includers."
+        end
 
         entry_class.after_create { StandardLedger::Modes::Inline.new.call(self) }
         entry_class.instance_variable_set(:@_standard_ledger_inline_installed, true)
@@ -45,7 +66,14 @@ module StandardLedger
       #
       # Projections targeting the same association coalesce: all handlers
       # for that target run, then the target is saved once. Different
-      # targets get their own apply+save cycle, in declared order.
+      # targets get their own apply+save cycle, in declared order. When any
+      # definition in a per-target group sets `lock: :pessimistic`, the
+      # cycle (apply + save) is wrapped in `target.with_lock`.
+      #
+      # Records the names of projections that actually ran (after `if:`
+      # guards filter) on the entry instance under
+      # `@_standard_ledger_applied_projections`, so `StandardLedger.post`
+      # can surface an accurate `result.projections[:inline]`.
       #
       # Any projector exception escapes — the entry's transaction rolls
       # back along with every counter mutation that ran before the failure.
@@ -58,23 +86,38 @@ module StandardLedger
         definitions = inline_definitions_for(entry.class)
         return if definitions.empty?
 
+        applied = []
+        entry.instance_variable_set(:@_standard_ledger_applied_projections, applied)
+
         # group_by preserves insertion order on Ruby >= 1.9, so declared
         # projection order is preserved across targets. Within a target
         # group, handlers run in declared order as well.
         definitions.group_by(&:target_association).each_value do |group|
           target = entry.public_send(group.first.target_association)
+          locked = group.any? { |definition| definition.lock == :pessimistic }
 
-          group.each do |definition|
-            instrument_projection(entry, target, definition) do
-              entry.apply_projection!(definition)
+          run_group = lambda do
+            group.each do |definition|
+              ran = instrument_projection(entry, target, definition) do
+                entry.apply_projection!(definition)
+              end
+              applied << definition.target_association if ran && !applied.include?(definition.target_association)
             end
+
+            # Coalesce: if any handler called `target.increment(col)` (which
+            # mutates in-memory only), persist the accumulated changes with a
+            # single UPDATE. Skipped when the target is nil (apply_projection!
+            # short-circuits) or when no handler dirtied the record. The
+            # `target` here always responds to AR's `changed?`/`save!` because
+            # it's resolved from a `belongs_to` reflection.
+            target.save! if target && target.changed?
           end
 
-          # Coalesce: if any handler called `target.increment(col)` (which
-          # mutates in-memory only), persist the accumulated changes with a
-          # single UPDATE. Skipped when the target is nil (apply_projection!
-          # short-circuits) or when no handler dirtied the record.
-          target.save! if target.respond_to?(:save!) && target.respond_to?(:changed?) && target.changed?
+          if locked && target.respond_to?(:with_lock)
+            target.with_lock(&run_group)
+          else
+            run_group.call
+          end
         end
       end
 
@@ -92,22 +135,35 @@ module StandardLedger
       # package success-or-failure into a single event) because the design
       # splits the two outcomes — see §5.7.
       #
+      # When the wrapped `apply_projection!` short-circuits (returns false
+      # because of a guard, nil target, or no-handler permissive miss), no
+      # `applied` event fires — there's no work to report. The exception
+      # path always fires `failed` so observability of failures isn't
+      # contingent on guard logic.
+      #
       # The exception is re-raised so the entry's transaction rolls back —
       # the notification's payload carries the error for observers
       # regardless of whether the listener swallows or re-raises.
+      #
+      # @return [Boolean] the truthy/falsy result of the wrapped block —
+      #   used by the caller to decide whether to record this projection
+      #   in the entry's `applied` list.
       def instrument_projection(entry, target, definition)
         prefix = StandardLedger.config.notification_namespace
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
-        begin
-          yield
-        rescue StandardError => e
-          ActiveSupport::Notifications.instrument(
-            "#{prefix}.projection.failed",
-            entry: entry, target: target, projection: definition, error: e
-          )
-          raise
-        end
+        ran =
+          begin
+            yield
+          rescue StandardError => e
+            ActiveSupport::Notifications.instrument(
+              "#{prefix}.projection.failed",
+              entry: entry, target: target, projection: definition, error: e
+            )
+            raise
+          end
+
+        return false unless ran
 
         duration_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000.0
         ActiveSupport::Notifications.instrument(
@@ -115,6 +171,7 @@ module StandardLedger
           entry: entry, target: target, projection: definition,
           mode: :inline, duration_ms: duration_ms
         )
+        true
       end
     end
   end

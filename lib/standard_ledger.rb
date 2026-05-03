@@ -53,16 +53,26 @@ module StandardLedger
     #                       targets: { voucher_scheme: scheme, customer_profile: profile },
     #                       attrs:   { serial_no: "v-123", organisation_id: org.id })
     #
+    # @example pass an id via attrs when you don't have a model instance
+    #   StandardLedger.post(VoucherRecord,
+    #                       kind:  :grant,
+    #                       attrs: { voucher_scheme_id: 42, organisation_id: org.id, serial_no: "v-1" })
+    #
     # @param entry_class [Class] an `ActiveRecord::Base` subclass that
     #   includes `StandardLedger::Entry`.
     # @param kind [Symbol, String] value for the entry's configured kind
     #   column (read from `entry_class.standard_ledger_entry_config[:kind]`).
-    # @param targets [Hash{Symbol => ActiveRecord::Base, Integer, String}]
-    #   association name -> target instance (or id). Each is assigned via
-    #   the matching `belongs_to` setter.
+    # @param targets [Hash{Symbol => ActiveRecord::Base}] association name ->
+    #   model instance. Each is assigned via the matching `belongs_to`
+    #   setter. To assign by id without loading the record, pass the
+    #   foreign key directly via `attrs:` (e.g. `voucher_scheme_id: 42`).
     # @param attrs [Hash] additional attributes merged into the create call.
     # @return [StandardLedger::Result, Object] the gem's Result, or the
-    #   host's Result type when `Config#custom_result?` is true.
+    #   host's Result type when `Config#custom_result?` is true. The Result's
+    #   `projections[:inline]` contains the target_association names of the
+    #   inline projections that actually ran for this entry — projections
+    #   skipped by an `if:` guard are excluded, and an idempotent retry
+    #   returns an empty array (no projections fire on the rescue path).
     def post(entry_class, kind:, targets: {}, attrs: {})
       kind_column = resolve_kind_column(entry_class)
       create_attrs = build_create_attrs(entry_class, kind_column, kind, targets, attrs)
@@ -73,7 +83,7 @@ module StandardLedger
         success: true,
         entry: entry,
         idempotent: entry.respond_to?(:idempotent?) && entry.idempotent?,
-        projections: { inline: applied_inline_names(entry_class) }
+        projections: { inline: applied_projections_for(entry) }
       )
     rescue ActiveRecord::RecordInvalid => e
       build_result(success: false, entry: e.record, errors: e.record.errors.full_messages)
@@ -89,9 +99,11 @@ module StandardLedger
       config ? config[:kind] : :kind
     end
 
-    # Translate `targets:` into the matching foreign-key assignments. Uses
-    # AR's reflection so the caller can pass either a model instance or an
-    # id, and the gem sets the right side of the belongs_to.
+    # Translate `targets:` into the matching foreign-key assignments by
+    # routing each value through the entry's `belongs_to` setter (after
+    # confirming via `reflect_on_association` that the key is a real
+    # association). Targets must be ActiveRecord instances; raw foreign-key
+    # ids should be passed via `attrs:` instead (`<assoc>_id: ...`).
     def build_create_attrs(entry_class, kind_column, kind, targets, attrs)
       assigned = { kind_column => kind }
 
@@ -112,13 +124,19 @@ module StandardLedger
       assigned.merge(attrs)
     end
 
-    # Names of the `:inline`-mode projections registered on this entry
-    # class — surfaced in `result.projections[:inline]` so callers can
+    # Names of the `:inline`-mode projections that actually ran for this
+    # entry — surfaced in `result.projections[:inline]` so callers can
     # distinguish "applied now" from "queued" from "scheduled" (§7).
-    def applied_inline_names(entry_class)
-      return [] unless entry_class.respond_to?(:standard_ledger_projections_for)
-
-      entry_class.standard_ledger_projections_for(:inline).map(&:target_association)
+    #
+    # `Modes::Inline#call` populates `@_standard_ledger_applied_projections`
+    # on the entry instance with the target_association names that ran
+    # (skipping projections whose `if:` guard returned false, whose target
+    # was nil, or whose permissive miss didn't hit a `:_` wildcard). When
+    # the ivar isn't present — e.g. an idempotent rescue returned an
+    # existing row without firing `after_create` — we report an empty
+    # list, which accurately reflects that no projections ran on this call.
+    def applied_projections_for(entry)
+      Array(entry.instance_variable_get(:@_standard_ledger_applied_projections))
     end
 
     # Construct a Result via the host's adapter when configured, otherwise

@@ -117,6 +117,63 @@ RSpec.describe "StandardLedger inline mode (end-to-end)" do
     ensure
       ActiveSupport::Notifications.unsubscribe(sub) if sub
     end
+
+    it "returns projections[:inline] = [] on idempotent retry" do
+      first = StandardLedger.post(
+        VoucherRecord,
+        kind: "grant", targets: { voucher_scheme: scheme, customer_profile: profile },
+        attrs: { organisation_id: "org-1", serial_no: "v-idem-proj" }
+      )
+      second = StandardLedger.post(
+        VoucherRecord,
+        kind: "grant", targets: { voucher_scheme: scheme, customer_profile: profile },
+        attrs: { organisation_id: "org-1", serial_no: "v-idem-proj" }
+      )
+
+      # First call ran both inline projections.
+      expect(first.projections[:inline]).to contain_exactly(:voucher_scheme, :customer_profile)
+
+      # Second call hit the idempotent rescue: no after_create fired, so
+      # nothing was projected this time around. The result must reflect that.
+      expect(second).to be_idempotent
+      expect(second.projections[:inline]).to eq([])
+    end
+
+    it "excludes guarded projections that skipped from result.projections[:inline]" do
+      stub_const("GuardedRecord", Class.new(ActiveRecord::Base) do
+        self.table_name = "voucher_records"
+        include StandardLedger::Entry
+        include StandardLedger::Projector
+
+        belongs_to :voucher_scheme
+        belongs_to :customer_profile
+
+        ledger_entry kind: :action, idempotency_key: :serial_no, scope: :organisation_id
+
+        # Always-fires projection
+        projects_onto :voucher_scheme, mode: :inline do
+          on(:grant) { |s, _| s.increment(:granted_vouchers_count) }
+        end
+
+        # Guard returns false → projection should be skipped
+        projects_onto :customer_profile, mode: :inline, if: -> { false } do
+          on(:grant) { |p, _| p.increment(:granted_vouchers_count) }
+        end
+      end)
+
+      result = StandardLedger.post(
+        GuardedRecord,
+        kind:    "grant",
+        targets: { voucher_scheme: scheme, customer_profile: profile },
+        attrs:   { organisation_id: "org-1", serial_no: "v-guarded" }
+      )
+
+      expect(result).to be_success
+      # Only the unguarded projection ran — the guarded one is absent.
+      expect(result.projections[:inline]).to contain_exactly(:voucher_scheme)
+      expect(scheme.reload.granted_vouchers_count).to eq(1)
+      expect(profile.reload.granted_vouchers_count).to eq(0)
+    end
   end
 
   describe "ActiveSupport::Notifications" do
@@ -241,6 +298,49 @@ RSpec.describe "StandardLedger inline mode (end-to-end)" do
 
       expect(with_lock_calls).to be >= 1
       expect(locking_scheme.reload.granted_vouchers_count).to eq(1)
+    end
+
+    # The lock must span both the handler invocation AND the coalesced
+    # `target.save!`. An earlier implementation wrapped only
+    # `apply_projection!`, releasing the row lock before the save —
+    # leaving a window where a concurrent post could read the pre-save
+    # row, causing a lost update. This test captures the order of
+    # operations and asserts the save lands while inside `with_lock`.
+    it "holds the lock through the coalesced save (lock spans save)" do
+      locking_scheme = LockingScheme.create!(name: "Locked-Save")
+
+      # Reset and re-instrument: capture the inside_lock state at the
+      # moment `save!` is invoked on the target.
+      events = []
+      allow(locking_scheme).to receive(:with_lock).and_wrap_original do |original, &block|
+        events << :with_lock_start
+        result = original.call(&block)
+        events << :with_lock_end
+        result
+      end
+      allow(locking_scheme).to receive(:save!).and_wrap_original do |original|
+        events << :save_called
+        original.call
+      end
+      allow(LockingScheme).to receive(:find).with(locking_scheme.id).and_return(locking_scheme)
+
+      LockedRecord.create!(
+        organisation_id: "org-1",
+        action:          "grant",
+        serial_no:       "v-lock-save",
+        voucher_scheme:  locking_scheme
+      )
+
+      # The save must land between with_lock_start and with_lock_end.
+      start_idx = events.index(:with_lock_start)
+      save_idx  = events.index(:save_called)
+      end_idx   = events.index(:with_lock_end)
+
+      expect(start_idx).not_to be_nil, "expected with_lock to be entered"
+      expect(save_idx).not_to be_nil,  "expected save! to be called for the coalesced UPDATE"
+      expect(end_idx).not_to be_nil,   "expected with_lock to exit"
+      expect(save_idx).to be > start_idx
+      expect(save_idx).to be < end_idx
     end
   end
 
