@@ -6,6 +6,24 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `StandardLedger::Entry` runtime: read-only enforcement after persistence
+  (`save`/`update`/`destroy` raise `ActiveRecord::ReadOnlyRecord` when
+  `immutable: true`, the default). `immutable: false` opts out.
+- `StandardLedger::Entry` idempotency rescue: `create!` traps
+  `ActiveRecord::RecordNotUnique` against the configured
+  `[*scope, idempotency_key]` unique index, looks up the existing row,
+  and returns it with `idempotent? == true`. `idempotency_key: nil` skips
+  the rescue and behaves as a regular `create!`.
+- Lazy boot-time index validation: the first idempotent `create!` call on
+  an Entry verifies a unique index covers exactly `[*scope,
+  idempotency_key]` (set equality, order-insensitive); raises
+  `MissingIdempotencyIndex` with a clear message if missing or if the
+  index covers extra columns. Cached per-class.
+- `spec/dummy/` minimal Rails-free AR harness backed by SQLite
+  `:memory:`, loaded from `spec/spec_helper.rb` so AR-backed integration
+  tests can run without a host app.
+
 ## [0.1.0] — 2026-05-04
 
 Initial scaffold. Establishes the gem layout, public API surface stubs, and the
@@ -46,8 +64,6 @@ roadmap.
 - Mode implementations: `:async` (`ProjectionJob` + `with_lock`), `:sql`
   (recompute via `update_all`), `:trigger` (host-owned, gem records rebuild
   SQL), `:matview` (`MatviewRefreshJob` + ad-hoc refresh).
-- Read-only enforcement on Entry; `RecordNotUnique` rescue for idempotency.
-- Boot-time index validation for `idempotency_key:` declarations.
 - `standard_ledger:doctor` rake task (verifies trigger presence, etc.).
 - Install generator (`rails g standard_ledger:install`).
 - ActiveSupport::Notifications instrumentation (`entry.created`,

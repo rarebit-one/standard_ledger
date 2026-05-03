@@ -6,6 +6,10 @@ end
 
 require "standard_ledger"
 
+require_relative "dummy/config/database"
+ActiveRecord::Schema.verbose = false
+load File.expand_path("dummy/db/schema.rb", __dir__)
+
 RSpec.configure do |config|
   config.expect_with :rspec do |c|
     c.syntax = :expect
