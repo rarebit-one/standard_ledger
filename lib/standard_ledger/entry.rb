@@ -152,7 +152,14 @@ module StandardLedger
       self.standard_ledger_entry_config = nil
       self.standard_ledger_idempotency_index_validated = false
 
-      before_destroy :standard_ledger_raise_readonly, if: :standard_ledger_immutable?
+      # The destroy guard only matters for AR includers (the production case);
+      # plain Ruby classes that include Entry for testing the DSL surface
+      # get the macro registration without the callback. AR's `readonly?`
+      # path covers save/update on persisted rows; this catch-all stops
+      # `destroy` for the AR case.
+      if respond_to?(:before_destroy)
+        before_destroy :standard_ledger_raise_readonly, if: :standard_ledger_immutable?
+      end
     end
 
     # Returns true when this row was returned from an idempotent `create!`
