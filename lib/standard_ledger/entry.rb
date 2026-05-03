@@ -55,6 +55,12 @@ module StandardLedger
       # Override AR's `create!` to add idempotency-by-unique-index semantics.
       # When the configured unique constraint trips, look up and return the
       # existing row with `idempotent? == true` instead of raising.
+      #
+      # @note Block-form `create! { |r| r.field = val }` is not supported for
+      #   the idempotent rescue: AR passes `attributes = nil` in that path so
+      #   we can't construct the find_by lookup. The rescue still functions
+      #   for the rest of the create — a colliding insert from a block-form
+      #   call simply re-raises `RecordNotUnique` like vanilla ActiveRecord.
       def create!(attributes = nil, &block)
         config = standard_ledger_entry_config
         return super if config.nil? || config[:idempotency_key].nil?
@@ -62,7 +68,9 @@ module StandardLedger
         validate_standard_ledger_idempotency_index!
 
         super
-      rescue ActiveRecord::RecordNotUnique
+      rescue ActiveRecord::RecordNotUnique => e
+        raise unless standard_ledger_idempotency_violation?(e)
+
         existing = find_existing_standard_ledger_entry(attributes)
         raise if existing.nil?
 
@@ -73,6 +81,12 @@ module StandardLedger
       # Verify that the table has a unique index covering exactly
       # `[*scope, idempotency_key]` (column set equality; order-insensitive).
       # Cached so the introspection runs once per class.
+      #
+      # The check-then-set on `standard_ledger_idempotency_index_validated`
+      # has a benign race: two threads can both observe `false`, both run the
+      # introspection, and both flip the flag to `true`. That's intentional
+      # — the validation is pure and idempotent, so duplicate work is cheap
+      # and the result is identical. No mutex needed; do not add one.
       def validate_standard_ledger_idempotency_index!
         return if standard_ledger_idempotency_index_validated
 
@@ -108,7 +122,27 @@ module StandardLedger
           memo[col] = attrs[col.to_sym]
         end
 
+        # Bail if any lookup value is nil — `find_by` would emit
+        # `WHERE col IS NULL` and could match an unrelated row whose column
+        # legitimately holds NULL. We require all idempotency columns to be
+        # present in `attributes` to make a confident match.
+        return nil if lookup.any? { |_, value| value.nil? }
+
         find_by(lookup)
+      end
+
+      # Confirm the RecordNotUnique was raised by *our* idempotency index,
+      # not some other unique constraint on the table (surrogate key,
+      # business column, etc.). The wrapped DB exception's message usually
+      # mentions the index name or the column list — a substring match on
+      # each idempotency column name is good enough across PG/MySQL/SQLite
+      # without parsing vendor-specific formats.
+      def standard_ledger_idempotency_violation?(exception)
+        config = standard_ledger_entry_config
+        columns = (config[:scope] + [ config[:idempotency_key] ]).map(&:to_s)
+        message = String(exception.message) + String(exception.cause&.message)
+
+        columns.all? { |col| message.include?(col) }
       end
     end
 

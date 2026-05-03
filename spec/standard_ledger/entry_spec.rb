@@ -35,12 +35,30 @@ RSpec.describe StandardLedger::Entry do
       include StandardLedger::Entry
       ledger_entry kind: :kind, idempotency_key: nil
     end)
+
+    stub_const("NullableScopeEntryModel", Class.new(ActiveRecord::Base) do
+      self.table_name = "nullable_scope_entries"
+      include StandardLedger::Entry
+      ledger_entry kind: :kind, idempotency_key: :idempotency_key, scope: :organisation_id
+    end)
+
+    stub_const("ExtraUniqueEntryModel", Class.new(ActiveRecord::Base) do
+      self.table_name = "extra_unique_entries"
+      include StandardLedger::Entry
+      ledger_entry kind: :kind, idempotency_key: :idempotency_key, scope: :organisation_id
+    end)
+
+    stub_const("PlainModel", Class.new(ActiveRecord::Base) do
+      self.table_name = "no_idempotency_entries"
+      include StandardLedger::Entry
+    end)
   end
 
   after do
-    [ "ledger_entries", "mutable_entries", "unscoped_entries",
-      "wide_index_entries", "missing_index_entries", "no_idempotency_entries" ].each do |t|
-      ActiveRecord::Base.connection.execute("DELETE FROM #{t}")
+    [ LedgerEntryModel, MutableEntryModel, UnscopedEntryModel,
+      WideIndexEntryModel, MissingIndexEntryModel, NoIdempotencyEntryModel,
+      NullableScopeEntryModel, ExtraUniqueEntryModel ].each do |model|
+      model.unscoped.delete_all
     end
   end
 
@@ -105,6 +123,55 @@ RSpec.describe StandardLedger::Entry do
       expect(second.id).to eq(first.id)
       expect(second.idempotent?).to be(true)
     end
+
+    it "re-raises RecordNotUnique when the violation is on a non-idempotency unique index" do
+      ExtraUniqueEntryModel.create!(
+        organisation_id: "org-1", kind: "grant",
+        idempotency_key: "k1",    external_ref: "ref-shared"
+      )
+
+      # Same external_ref (other unique index), different idempotency_key —
+      # the rescue must NOT swallow this; the conflict isn't on our index.
+      expect {
+        ExtraUniqueEntryModel.create!(
+          organisation_id: "org-1", kind: "grant",
+          idempotency_key: "k2",    external_ref: "ref-shared"
+        )
+      }.to raise_error(ActiveRecord::RecordNotUnique)
+    end
+
+    it "raises RecordNotUnique on collision when create! is called with a block (no attributes hash)" do
+      LedgerEntryModel.create!(organisation_id: "org-1", kind: "grant", idempotency_key: "blk")
+
+      # Block-form `create!` passes `attributes = nil` to the override, so
+      # we can't construct the find_by lookup — colliding inserts re-raise
+      # like vanilla ActiveRecord rather than returning the existing row.
+      expect {
+        LedgerEntryModel.create! do |r|
+          r.organisation_id = "org-1"
+          r.kind = "grant"
+          r.idempotency_key = "blk"
+        end
+      }.to raise_error(ActiveRecord::RecordNotUnique)
+    end
+
+    it "does not match a row with NULL scope when the scope attribute is missing" do
+      # Pre-seed a row where organisation_id is NULL (legal because the
+      # column is nullable here). A subsequent insert that omits the scope
+      # column entirely must NOT be treated as idempotent against this row.
+      seeded = NullableScopeEntryModel.create!(kind: "grant", idempotency_key: "n1")
+      expect(seeded.organisation_id).to be_nil
+
+      # Now provoke a different unique-index collision on the same key but
+      # for a real org — the find_by must not fall back to the NULL-scope
+      # row. Insert the colliding row directly to bypass the rescue and
+      # then check that find_existing_standard_ledger_entry guards nil.
+      lookup = NullableScopeEntryModel.send(
+        :find_existing_standard_ledger_entry,
+        kind: "grant", idempotency_key: "n1"  # no organisation_id
+      )
+      expect(lookup).to be_nil
+    end
   end
 
   describe "boot-time index validation" do
@@ -135,6 +202,16 @@ RSpec.describe StandardLedger::Entry do
       expect(a.id).not_to eq(b.id)
       expect(a.idempotent?).to be(false)
       expect(b.idempotent?).to be(false)
+    end
+  end
+
+  describe ".standard_ledger_entry?" do
+    it "returns true on a class that has called ledger_entry" do
+      expect(LedgerEntryModel.standard_ledger_entry?).to be(true)
+    end
+
+    it "returns false on a class that includes Entry but never called the macro" do
+      expect(PlainModel.standard_ledger_entry?).to be(false)
     end
   end
 end

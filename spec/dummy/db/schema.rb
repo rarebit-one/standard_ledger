@@ -60,4 +60,40 @@ ActiveRecord::Schema.define do
     t.string :payload
     t.timestamps
   end
+
+  # Entry whose scope column allows NULLs. Used to assert that an attribute
+  # hash missing the scope column does NOT match a row where the scope
+  # column is null (avoids `WHERE col IS NULL` matching the wrong row).
+  create_table :nullable_scope_entries, force: true do |t|
+    t.string :organisation_id  # nullable on purpose
+    t.string :kind, null: false
+    t.string :idempotency_key, null: false
+    t.timestamps
+  end
+
+  add_index :nullable_scope_entries,
+            %i[organisation_id idempotency_key],
+            unique: true,
+            name: "index_nullable_scope_entries_on_org_and_key"
+
+  # Entry with an additional unique index on a non-idempotency column —
+  # used to confirm the rescue narrows to the configured idempotency
+  # index and re-raises violations from other unique constraints.
+  create_table :extra_unique_entries, force: true do |t|
+    t.string :organisation_id, null: false
+    t.string :kind, null: false
+    t.string :idempotency_key, null: false
+    t.string :external_ref, null: false
+    t.timestamps
+  end
+
+  add_index :extra_unique_entries,
+            %i[organisation_id idempotency_key],
+            unique: true,
+            name: "index_extra_unique_entries_on_org_and_key"
+
+  add_index :extra_unique_entries,
+            :external_ref,
+            unique: true,
+            name: "index_extra_unique_entries_on_external_ref"
 end
