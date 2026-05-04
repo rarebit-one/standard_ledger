@@ -7,6 +7,27 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `:sql` mode: single-`UPDATE` recompute projections that bind
+  `:target_id` from the entry's foreign key. Block-DSL takes a single
+  `recompute "..."` clause instead of per-kind `on(:kind)` handlers; the
+  same SQL serves both the after-create path and `StandardLedger.rebuild!`.
+  Fires inside `after_create` (in the entry's transaction), so failures
+  roll back the entry alongside the projection. Skips silently on nil
+  FK or false `if:` guard. Notifications under the configured prefix:
+  `<prefix>.projection.applied` (mode: `:sql`, `target: nil`, includes
+  `duration_ms`) and `<prefix>.projection.failed` (re-raises after the
+  payload is published). Registration validates that `:target_id`
+  appears in the SQL, that no `via:` is supplied (the recompute SQL is
+  the contract), and that the block actually called `recompute`.
+  `StandardLedger.rebuild!` runs the same statement against each target
+  the log references; `target:` / `target_class:` / no-arg scoping
+  works the same as for `:inline`.
+- Integration spec
+  (`spec/standard_ledger/sql_integration_spec.rb`) covers the
+  end-to-end `:sql` flow: registration validation, after-create
+  execution, transactional rollback, `if:`-guard skip, nil-FK skip,
+  notifications, idempotent install, and rebuild over single + all
+  targets.
 - Install generator: `rails g standard_ledger:install` writes
   `config/initializers/standard_ledger.rb` with commented-out examples
   covering every public `Config` setting (async retries, scheduler,
@@ -178,8 +199,8 @@ roadmap.
 ### Pending (tracked in design doc, lands in subsequent PRs)
 - `StandardLedger.refresh!(:view_name)` ad-hoc matview refresh.
 - Remaining mode implementations: `:async` (`ProjectionJob` + `with_lock`),
-  `:sql` (recompute via `update_all`), `:trigger` (host-owned, gem
-  records rebuild SQL), `:matview` (`MatviewRefreshJob` + ad-hoc refresh).
+  `:trigger` (host-owned, gem records rebuild SQL), `:matview`
+  (`MatviewRefreshJob` + ad-hoc refresh).
 - `standard_ledger:doctor` rake task (verifies trigger presence, etc.).
 
 [Unreleased]: https://github.com/rarebit-one/standard_ledger/compare/v0.1.0...HEAD

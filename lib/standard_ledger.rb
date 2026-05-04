@@ -11,6 +11,7 @@ require "standard_ledger/entry"
 require "standard_ledger/projection"
 require "standard_ledger/projector"
 require "standard_ledger/modes/inline"
+require "standard_ledger/modes/sql"
 require "standard_ledger/engine" if defined?(::Rails::Engine)
 
 # StandardLedger captures the recurring "immutable journal entry → N
@@ -260,7 +261,11 @@ module StandardLedger
         validate_rebuildable_projector!(entry_class, definition)
 
         each_rebuild_target(entry_class, definition, target: target, batch_size: batch_size) do |t|
-          rebuild_one(entry_class, definition, t)
+          if definition.mode == :sql
+            rebuild_one_sql(entry_class, definition, t)
+          else
+            rebuild_one(entry_class, definition, t)
+          end
           rebuilt << { target_class: t.class, target_id: t.id, projection: definition.target_association }
         end
       end
@@ -361,10 +366,10 @@ module StandardLedger
     end
 
     # Refuse to rebuild for modes that don't yet implement the
-    # log-replay path. `:inline` is the only supported mode today;
-    # the rest land with their own mode PRs.
+    # log-replay path. The remaining modes land with their own mode PRs.
     def validate_rebuildable_mode!(entry_class, definition)
       return if definition.mode == :inline
+      return if definition.mode == :sql
 
       raise StandardLedger::Error,
             "rebuild! does not yet support mode: #{definition.mode.inspect} " \
@@ -380,6 +385,11 @@ module StandardLedger
     # rebuildable should extract a `Projection` subclass and implement
     # `rebuild(target)`.
     def validate_rebuildable_projector!(entry_class, definition)
+      # `:sql` mode carries its rebuild path in the recompute SQL itself —
+      # no projector class is required (and `via:` is rejected at
+      # registration). Skip the class-form preflight checks below.
+      return if definition.mode == :sql
+
       if definition.projector_class.nil?
         raise StandardLedger::NotRebuildable,
               "#{entry_class.name}##{definition.target_association} is a block-form projection " \
@@ -437,6 +447,24 @@ module StandardLedger
     def rebuild_one(entry_class, definition, target)
       target.class.transaction do
         definition.projector_class.new.rebuild(target)
+      end
+
+      prefix = config.notification_namespace
+      ActiveSupport::Notifications.instrument(
+        "#{prefix}.projection.rebuilt",
+        entry_class: entry_class, target: target, projection: definition, mode: definition.mode
+      )
+    end
+
+    # `:sql` mode rebuild path: run the same recompute SQL the
+    # `after_create` callback runs, just bound to this target's id rather
+    # than the entry's foreign key. The recompute SQL is the entire
+    # contract for `:sql` projections — there's no projector class to
+    # invoke; the after-create and rebuild paths share one statement.
+    def rebuild_one_sql(entry_class, definition, target)
+      target.class.transaction do
+        sql = ActiveRecord::Base.sanitize_sql_array([ definition.recompute_sql, { target_id: target.id } ])
+        entry_class.connection.exec_update(sql)
       end
 
       prefix = config.notification_namespace

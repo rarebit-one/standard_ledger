@@ -30,7 +30,8 @@ module StandardLedger
     # Stored on the entry class so `StandardLedger.post` and
     # `StandardLedger.rebuild!` can iterate over them at runtime.
     Definition = Struct.new(
-      :target_association, :mode, :projector_class, :handlers, :guard, :lock, :permissive, :options,
+      :target_association, :mode, :projector_class, :handlers, :guard, :lock, :permissive,
+      :recompute_sql, :options,
       keyword_init: true
     )
 
@@ -56,6 +57,64 @@ module StandardLedger
       # @return [Definition] the registered projection.
       def projects_onto(target_association, mode:, via: nil, if: nil, lock: nil, permissive: false, **options, &block)
         guard = binding.local_variable_get(:if) # `if:` is a reserved keyword
+
+        if mode == :sql
+          if via
+            raise ArgumentError,
+                  "projects_onto :#{target_association} got `via:` with mode: :sql; " \
+                  "`:sql` mode's contract is the recompute SQL itself, declared via `recompute \"...\"` " \
+                  "in the block — use a different mode if you want a `via:` projector class"
+          end
+
+          unless lock.nil?
+            raise ArgumentError,
+                  "projects_onto :#{target_association} got `lock:` with mode: :sql; " \
+                  "`lock:` is not supported by :sql mode — recompute SQL doesn't dispatch through " \
+                  "with_lock; use :inline mode if you need pessimistic locking"
+          end
+
+          if permissive
+            raise ArgumentError,
+                  "projects_onto :#{target_association} got `permissive:` with mode: :sql; " \
+                  "`permissive:` is not supported by :sql mode — recompute SQL doesn't dispatch " \
+                  "through per-kind handlers; use :inline mode if you need permissive dispatch"
+          end
+
+          unless block
+            raise ArgumentError,
+                  "projects_onto :#{target_association} requires a block with `recompute \"...\"` for mode: :sql"
+          end
+
+          dsl = SqlDsl.new
+          dsl.instance_eval(&block)
+
+          if dsl.recompute_sql.nil?
+            raise ArgumentError,
+                  "projects_onto :#{target_association} block is empty; mode: :sql requires a `recompute \"...\"` clause"
+          end
+
+          unless dsl.recompute_sql.include?(":target_id")
+            raise ArgumentError,
+                  "projects_onto :#{target_association} recompute SQL must include the `:target_id` placeholder; " \
+                  "it's bound to the entry's foreign key for this projection's target"
+          end
+
+          definition = Definition.new(
+            target_association: target_association,
+            mode: mode,
+            projector_class: nil,
+            handlers: {},
+            guard: guard,
+            lock: lock,
+            permissive: permissive,
+            recompute_sql: dsl.recompute_sql,
+            options: options
+          )
+
+          self.standard_ledger_projections = standard_ledger_projections + [ definition ]
+          install_mode_callbacks_for(definition)
+          return definition
+        end
 
         if block && via
           raise ArgumentError,
@@ -94,6 +153,7 @@ module StandardLedger
           guard: guard,
           lock: lock,
           permissive: permissive,
+          recompute_sql: nil,
           options: options
         )
 
@@ -114,6 +174,8 @@ module StandardLedger
         case definition.mode
         when :inline
           StandardLedger::Modes::Inline.install!(self)
+        when :sql
+          StandardLedger::Modes::Sql.install!(self)
         end
       end
 
@@ -157,6 +219,12 @@ module StandardLedger
     # @raise [StandardLedger::UnhandledKind] when no handler matches and
     #   `permissive: false`.
     def apply_projection!(definition)
+      if definition.mode == :sql
+        raise Error,
+              "apply_projection! is not supported for mode: :sql; " \
+              "the recompute SQL runs through `Modes::Sql#call` directly with no per-kind dispatch"
+      end
+
       return false if definition.guard && !instance_exec(&definition.guard)
 
       target = public_send(definition.target_association)
@@ -215,6 +283,28 @@ module StandardLedger
       def on(kind, &block)
         raise ArgumentError, "on(:#{kind}) requires a block" unless block
         @handlers[kind.to_sym] = block
+      end
+    end
+
+    # Internal collector for the `:sql`-mode block-DSL form. Captures the
+    # `recompute "..."` clause's SQL string. Unlike `HandlerDsl` there are
+    # no per-kind handlers — the recompute SQL is the entire contract: it
+    # must be expressible as a single statement with `:target_id` bound
+    # from the entry's foreign key, and it serves both the after-create
+    # path and `StandardLedger.rebuild!`.
+    class SqlDsl
+      attr_reader :recompute_sql
+
+      def recompute(sql)
+        unless sql.is_a?(String)
+          raise ArgumentError, "recompute requires a SQL string; got #{sql.class}"
+        end
+        unless @recompute_sql.nil?
+          raise ArgumentError,
+                "recompute called more than once in the same projects_onto block; " \
+                ":sql mode supports exactly one recompute clause per projection"
+        end
+        @recompute_sql = sql
       end
     end
   end

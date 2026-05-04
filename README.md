@@ -101,6 +101,37 @@ mid-loop are not unwound. Block-form (delta) projections raise
 `NotRebuildable` because they cannot be reconstructed from the log
 without a host-supplied recompute path.
 
+For projections expressible as a single `UPDATE` over an aggregate of the
+log, use `mode: :sql` — no Ruby-side handlers, no AR object loads, just
+a recompute statement that runs in the entry's `after_create`:
+
+```ruby
+class VoucherRecord < ApplicationRecord
+  include StandardLedger::Entry
+  include StandardLedger::Projector
+
+  ledger_entry kind: :action, idempotency_key: :serial_no, scope: :organisation_id
+
+  belongs_to :voucher_scheme
+
+  projects_onto :voucher_scheme, mode: :sql do
+    recompute <<~SQL
+      UPDATE voucher_schemes SET
+        granted_vouchers_count     = (SELECT COUNT(*) FROM voucher_records WHERE voucher_scheme_id = :target_id AND action = 'grant'),
+        redeemed_vouchers_count    = (SELECT COUNT(*) FROM voucher_records WHERE voucher_scheme_id = :target_id AND action = 'redeem'),
+        consumed_vouchers_count    = (SELECT COUNT(*) FROM voucher_records WHERE voucher_scheme_id = :target_id AND action = 'consume'),
+        clawed_back_vouchers_count = (SELECT COUNT(*) FROM voucher_records WHERE voucher_scheme_id = :target_id AND action = 'clawback')
+      WHERE id = :target_id
+    SQL
+  end
+end
+```
+
+The gem binds `:target_id` from the entry's foreign key. The recompute
+SQL is the entire contract — `:sql` projections are naturally
+rebuildable: `StandardLedger.rebuild!` runs the same statement against
+every target the log references.
+
 Five projection modes — pick per declaration:
 
 | Mode | Where the work runs | Transactional? | Rebuildable? |
