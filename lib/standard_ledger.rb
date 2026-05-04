@@ -173,8 +173,11 @@ module StandardLedger
     #
     # - `target:` — rebuild every projection whose `target_association`
     #   resolves to `target.class`, for that single instance.
-    # - `target_class:` — rebuild every matching projection for every row
-    #   of that AR class, in `find_each` batches.
+    # - `target_class:` — rebuild every matching projection for every
+    #   target referenced by the log for that AR class, in `find_each`
+    #   batches. Targets with zero log entries are skipped (rebuilding a
+    #   target the log never touched would zero its counters — destructive
+    #   rather than corrective).
     # - neither — rebuild every projection on `entry_class` for every
     #   target referenced by the log.
     #
@@ -210,8 +213,9 @@ module StandardLedger
     #   includes `StandardLedger::Projector`.
     # @param target [ActiveRecord::Base, nil] one specific projection
     #   target instance.
-    # @param target_class [Class, nil] rebuild for every row of this
-    #   AR class.
+    # @param target_class [Class, nil] rebuild for every target of this
+    #   AR class that the log references. Targets with zero log entries
+    #   are skipped.
     # @param batch_size [Integer] passed to `find_each` when iterating
     #   targets. Default 1000.
     # @return [StandardLedger::Result, Object] success result with
@@ -226,8 +230,15 @@ module StandardLedger
     # @raise [StandardLedger::Error] when an applicable projection
     #   declares a mode `rebuild!` does not yet support.
     # @raise [ArgumentError] when both `target:` and `target_class:`
-    #   are supplied, or when the entry class does not respond to
-    #   `standard_ledger_projections`.
+    #   are supplied, when the entry class does not respond to
+    #   `standard_ledger_projections`, or when a non-nil scope
+    #   (`target:` / `target_class:`) matches no registered projection.
+    # @note Memory: when neither `target:` nor `target_class:` is given,
+    #   the no-scope and `target_class:` paths first load every distinct
+    #   foreign-key value from the log into memory via `distinct.pluck`
+    #   before batching the targets themselves. For very large logs,
+    #   prefer `target:` to scope to a single target rather than
+    #   rebuilding the full set.
     def rebuild!(entry_class, target: nil, target_class: nil, batch_size: 1000)
       if target && target_class
         raise ArgumentError,
@@ -241,6 +252,7 @@ module StandardLedger
       end
 
       definitions = applicable_definitions_for_rebuild(entry_class, target: target, target_class: target_class)
+      validate_definitions_present!(entry_class, definitions, target: target, target_class: target_class)
       rebuilt = []
 
       definitions.each do |definition|
@@ -262,7 +274,7 @@ module StandardLedger
       # A projector raised mid-rebuild. Earlier successful rebuilds are
       # NOT unwound (the contract is per-target transactional, not
       # cross-target atomic) — we surface the failure but return.
-      build_result(success: false, errors: [ e.message ], projections: { rebuilt: rebuilt || [] })
+      build_result(success: false, errors: [ e.message ], projections: { rebuilt: rebuilt })
     end
 
     private
@@ -315,6 +327,29 @@ module StandardLedger
       end
     end
 
+    # An empty `definitions` set means either (a) the host called
+    # `rebuild!` on an entry class that has no `projects_onto`
+    # declarations at all, or (b) a non-nil scope (`target:` /
+    # `target_class:`) was passed but no registered projection points at
+    # that AR class. Both are programmer errors — silently returning
+    # `Result.success` with `rebuilt: []` would let the mistake go
+    # undetected. Raise so the caller hears about it.
+    def validate_definitions_present!(entry_class, definitions, target:, target_class:)
+      return unless definitions.empty?
+
+      requested_class = target_class || target&.class
+
+      if requested_class
+        raise ArgumentError,
+              "#{entry_class.name} has no projections matching #{requested_class.name}; " \
+              "check the `projects_onto` declarations on #{entry_class.name}."
+      else
+        raise ArgumentError,
+              "#{entry_class.name} has no projections registered; " \
+              "add a `projects_onto` declaration before calling rebuild!."
+      end
+    end
+
     # Resolve the AR class on the far side of a projection's
     # `target_association`. Used to match `target:` / `target_class:`
     # against registered projections.
@@ -352,6 +387,16 @@ module StandardLedger
               "`rebuild(target)` and pass it via `via:` to make this projection rebuildable."
       end
 
+      # Best-effort early detection: catches the common "host forgot to
+      # override `rebuild`" case before we iterate any targets. The owner
+      # check is fragile for projectors that inherit `rebuild` from an
+      # intermediate mixin/superclass — the inherited `rebuild` may still
+      # raise `NotRebuildable` at runtime. The authoritative gate is the
+      # base `Projection#rebuild` implementation, which raises
+      # `NotRebuildable` itself; the rescue clause in `rebuild!` re-raises
+      # it unchanged. So a fragility miss here just means the failure
+      # surfaces at iteration-time instead of pre-flight, which is
+      # acceptable for v0.1.
       return if definition.projector_class.instance_method(:rebuild).owner != StandardLedger::Projection
 
       raise StandardLedger::NotRebuildable,

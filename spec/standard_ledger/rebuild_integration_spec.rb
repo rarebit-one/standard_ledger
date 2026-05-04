@@ -287,9 +287,46 @@ RSpec.describe "StandardLedger.rebuild! (end-to-end)" do
         StandardLedger.rebuild!(BareEntry)
       }.to raise_error(ArgumentError, /does not include StandardLedger::Projector/)
     end
+
+    it "raises ArgumentError when target_class: matches no registered projection" do
+      # VoucherRecord projects onto :voucher_scheme — a target_class
+      # of CustomerProfile resolves to zero applicable definitions.
+      expect {
+        StandardLedger.rebuild!(VoucherRecord, target_class: CustomerProfile)
+      }.to raise_error(ArgumentError, /no projections matching CustomerProfile/)
+    end
+
+    it "raises ArgumentError when target: is an instance whose class isn't a projection target" do
+      profile = CustomerProfile.create!(name: "P")
+      expect {
+        StandardLedger.rebuild!(VoucherRecord, target: profile)
+      }.to raise_error(ArgumentError, /no projections matching CustomerProfile/)
+    end
+
+    it "raises ArgumentError when no scope is given and the entry class has zero projections" do
+      stub_const("ProjectorlessRecord", Class.new(ActiveRecord::Base) do
+        self.table_name = "voucher_records"
+        include StandardLedger::Entry
+        include StandardLedger::Projector
+
+        belongs_to :voucher_scheme
+
+        ledger_entry kind: :action, idempotency_key: :serial_no, scope: :organisation_id
+      end)
+
+      expect {
+        StandardLedger.rebuild!(ProjectorlessRecord)
+      }.to raise_error(ArgumentError, /no projections registered/)
+    end
   end
 
   describe "result interop" do
+    # The auto-cleanup hook in `standard_ledger/rspec` only clears the
+    # thread-local `with_modes` map; it deliberately leaves Config alone so a
+    # host's initializer survives between examples. Specs that mutate Config
+    # (the host-Result-adapter case below) restore it explicitly here.
+    after { StandardLedger.reset! }
+
     it "returns StandardLedger::Result by default" do
       post_voucher_log(2, scheme: scheme)
       result = StandardLedger.rebuild!(VoucherRecord, target: scheme)
