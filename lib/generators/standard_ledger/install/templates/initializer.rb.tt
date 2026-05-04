@@ -4,8 +4,7 @@
 # StandardLedger captures the recurring "immutable journal entry → N
 # aggregate projections" pattern as a declarative DSL on host ActiveRecord
 # models. See https://github.com/rarebit-one/standard_ledger for the gem
-# README and the workspace's standard_ledger-design.md for the full
-# design discussion.
+# README.
 #
 # All commented-out lines below show the public DSL — uncomment and edit
 # the ones that apply to your app.
@@ -47,7 +46,6 @@ StandardLedger.configure do |c|
   #   <prefix>.entry.created
   #   <prefix>.projection.applied
   #   <prefix>.projection.failed
-  #   <prefix>.projection.rebuilt
   # c.notification_namespace = "standard_ledger"
 
   # ---------------------------------------------------------------------------

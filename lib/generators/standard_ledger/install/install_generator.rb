@@ -22,7 +22,7 @@ module StandardLedger
 
       def create_initializer_file
         path = "config/initializers/standard_ledger.rb"
-        if File.exist?(File.join(destination_root, path)) && !options[:force]
+        if File.exist?(File.join(destination_root, path)) && !options.force?
           say_status("skip", "#{path} already present, skipping (use --force to overwrite)", :yellow)
           return
         end

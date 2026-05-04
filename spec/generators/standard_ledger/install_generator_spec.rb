@@ -44,6 +44,7 @@ RSpec.describe StandardLedger::Generators::InstallGenerator, type: :generator do
       run_generator
       content = File.read(initializer_path)
 
+      expect(content).to include("# c.default_async_job = Orders::FulfillableProjectionJob")
       expect(content).to include("# c.default_async_retries = 3")
       expect(content).to include("# c.scheduler = :solid_queue")
       expect(content).to include("# c.matview_refresh_strategy = :concurrent")
