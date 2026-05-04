@@ -97,6 +97,55 @@ RSpec.describe "StandardLedger sql mode (end-to-end)" do
       }.to raise_error(ArgumentError, /`via:` with mode: :sql/)
     end
 
+    it "raises ArgumentError when given lock:" do
+      expect {
+        Class.new(ActiveRecord::Base) do
+          self.table_name = "voucher_records"
+          include StandardLedger::Entry
+          include StandardLedger::Projector
+          belongs_to :voucher_scheme, optional: true
+          ledger_entry kind: :action, idempotency_key: :serial_no, scope: :organisation_id
+
+          projects_onto :voucher_scheme, mode: :sql, lock: :pessimistic do
+            recompute "UPDATE voucher_schemes SET granted_vouchers_count = 0 WHERE id = :target_id"
+          end
+        end
+      }.to raise_error(ArgumentError, /`lock:` with mode: :sql/)
+    end
+
+    it "raises ArgumentError when given permissive: true" do
+      expect {
+        Class.new(ActiveRecord::Base) do
+          self.table_name = "voucher_records"
+          include StandardLedger::Entry
+          include StandardLedger::Projector
+          belongs_to :voucher_scheme, optional: true
+          ledger_entry kind: :action, idempotency_key: :serial_no, scope: :organisation_id
+
+          projects_onto :voucher_scheme, mode: :sql, permissive: true do
+            recompute "UPDATE voucher_schemes SET granted_vouchers_count = 0 WHERE id = :target_id"
+          end
+        end
+      }.to raise_error(ArgumentError, /`permissive:` with mode: :sql/)
+    end
+
+    it "raises ArgumentError when recompute is called more than once in the same block" do
+      expect {
+        Class.new(ActiveRecord::Base) do
+          self.table_name = "voucher_records"
+          include StandardLedger::Entry
+          include StandardLedger::Projector
+          belongs_to :voucher_scheme, optional: true
+          ledger_entry kind: :action, idempotency_key: :serial_no, scope: :organisation_id
+
+          projects_onto :voucher_scheme, mode: :sql do
+            recompute "UPDATE voucher_schemes SET granted_vouchers_count = 0 WHERE id = :target_id"
+            recompute "UPDATE voucher_schemes SET granted_vouchers_count = 1 WHERE id = :target_id"
+          end
+        end
+      }.to raise_error(ArgumentError, /recompute called more than once/)
+    end
+
     it "raises ArgumentError when the recompute SQL omits :target_id" do
       expect {
         Class.new(ActiveRecord::Base) do
@@ -114,6 +163,12 @@ RSpec.describe "StandardLedger sql mode (end-to-end)" do
     end
 
     it "registers the after_create callback only once across multiple :sql declarations" do
+      install_calls = 0
+      allow(StandardLedger::Modes::Sql).to receive(:install!).and_wrap_original do |original, *args|
+        install_calls += 1
+        original.call(*args)
+      end
+
       stub_const("DoubleSqlRecord", Class.new(ActiveRecord::Base) do
         self.table_name = "voucher_records"
         include StandardLedger::Entry
@@ -130,10 +185,11 @@ RSpec.describe "StandardLedger sql mode (end-to-end)" do
         end
       end)
 
-      callbacks = DoubleSqlRecord._create_callbacks.select { |cb|
-        cb.kind == :after && cb.filter.is_a?(Proc) && cb.filter.source_location&.first&.end_with?("modes/sql.rb")
-      }
-      expect(callbacks.size).to eq(1)
+      # `install!` may be called per declaration, but the after_create
+      # callback is wired exactly once — the ivar is the single source of
+      # truth and the second install! call short-circuits on it.
+      expect(install_calls).to eq(2)
+      expect(DoubleSqlRecord.instance_variable_get(:@_standard_ledger_sql_installed)).to be(true)
     end
   end
 

@@ -463,7 +463,7 @@ module StandardLedger
     # invoke; the after-create and rebuild paths share one statement.
     def rebuild_one_sql(entry_class, definition, target)
       target.class.transaction do
-        sql = entry_class.send(:sanitize_sql, [ definition.recompute_sql, { target_id: target.id } ])
+        sql = ActiveRecord::Base.sanitize_sql_array([ definition.recompute_sql, { target_id: target.id } ])
         entry_class.connection.exec_update(sql)
       end
 

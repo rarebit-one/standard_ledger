@@ -108,12 +108,13 @@ module StandardLedger
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
         begin
-          sql = entry.class.send(:sanitize_sql, [ definition.recompute_sql, { target_id: target_id } ])
+          sql = ActiveRecord::Base.sanitize_sql_array([ definition.recompute_sql, { target_id: target_id } ])
           entry.class.connection.exec_update(sql)
         rescue StandardError => e
+          duration_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000.0
           ActiveSupport::Notifications.instrument(
             "#{prefix}.projection.failed",
-            entry: entry, target: nil, projection: definition, error: e
+            entry: entry, target: nil, projection: definition, error: e, duration_ms: duration_ms
           )
           raise
         end

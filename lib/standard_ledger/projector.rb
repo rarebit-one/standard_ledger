@@ -66,6 +66,20 @@ module StandardLedger
                   "in the block — use a different mode if you want a `via:` projector class"
           end
 
+          unless lock.nil?
+            raise ArgumentError,
+                  "projects_onto :#{target_association} got `lock:` with mode: :sql; " \
+                  "`lock:` is not supported by :sql mode — recompute SQL doesn't dispatch through " \
+                  "with_lock; use :inline mode if you need pessimistic locking"
+          end
+
+          if permissive
+            raise ArgumentError,
+                  "projects_onto :#{target_association} got `permissive:` with mode: :sql; " \
+                  "`permissive:` is not supported by :sql mode — recompute SQL doesn't dispatch " \
+                  "through per-kind handlers; use :inline mode if you need permissive dispatch"
+          end
+
           unless block
             raise ArgumentError,
                   "projects_onto :#{target_association} requires a block with `recompute \"...\"` for mode: :sql"
@@ -284,6 +298,11 @@ module StandardLedger
       def recompute(sql)
         unless sql.is_a?(String)
           raise ArgumentError, "recompute requires a SQL string; got #{sql.class}"
+        end
+        unless @recompute_sql.nil?
+          raise ArgumentError,
+                "recompute called more than once in the same projects_onto block; " \
+                ":sql mode supports exactly one recompute clause per projection"
         end
         @recompute_sql = sql
       end
