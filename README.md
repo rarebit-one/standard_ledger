@@ -116,6 +116,49 @@ StandardLedger.configure do |c|
 end
 ```
 
+## Testing
+
+The gem ships an opt-in RSpec support file. Hosts add this to their
+`spec/rails_helper.rb`:
+
+```ruby
+require "standard_ledger/rspec"
+```
+
+That registers a `before(:each)` hook that calls `StandardLedger.reset!`
+between examples (so per-spec configuration doesn't leak), and exposes:
+
+- `post_ledger_entry(EntryClass).with(...)` — a block matcher that
+  subscribes to the `<namespace>.entry.created` notification for the
+  duration of the block and asserts an entry of the expected class was
+  written (with optional `kind:`/`targets:`/`attrs:` constraints).
+
+  ```ruby
+  it "records a voucher grant" do
+    expect {
+      Vouchers::IssueOperation.call(scheme: scheme, profile: profile)
+    }.to post_ledger_entry(VoucherRecord).with(
+      kind:    :grant,
+      targets: { voucher_scheme: scheme, customer_profile: profile },
+      attrs:   { serial_no: "v-2025-1" }
+    )
+  end
+  ```
+
+- `with_modes(EntryClass => :inline) { ... }` — forces specific entry
+  classes' projections to run inline for the duration of the block. The
+  override is thread-local and restored on block exit, so async-mode
+  projections can be exercised end-to-end in a unit spec without a job
+  runner.
+
+  ```ruby
+  it "fast-runs an async projection inline" do
+    with_modes(PaymentRecord => :inline) do
+      Orders::CheckoutOperation.call(...)
+    end
+  end
+  ```
+
 ## Development
 
 ```bash

@@ -393,6 +393,13 @@ RSpec.describe "StandardLedger inline mode (end-to-end)" do
   end
 
   describe "Result interop" do
+    # Wipe any host result adapter installed by these examples so it doesn't
+    # leak into other examples. The `standard_ledger/rspec` auto-cleanup hook
+    # deliberately preserves `Config` between examples (so host initializer
+    # configs survive), so specs that *mutate* config in-test must clean up
+    # after themselves.
+    after { StandardLedger.reset! }
+
     it "returns StandardLedger::Result by default" do
       result = StandardLedger.post(
         VoucherRecord,
