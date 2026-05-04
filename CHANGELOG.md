@@ -7,6 +7,12 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Install generator: `rails g standard_ledger:install` writes
+  `config/initializers/standard_ledger.rb` with commented-out examples
+  covering every public `Config` setting (async retries, scheduler,
+  matview strategy, notification namespace, host Result interop). The
+  generator is idempotent — re-running on an existing initializer skips
+  with a clear message; pass `--force` to overwrite.
 - `StandardLedger::Entry` runtime: read-only enforcement after persistence
   (`save`/`update`/`destroy` raise `ActiveRecord::ReadOnlyRecord` when
   `immutable: true`, the default). `immutable: false` opts out.
@@ -132,7 +138,6 @@ roadmap.
   `:sql` (recompute via `update_all`), `:trigger` (host-owned, gem
   records rebuild SQL), `:matview` (`MatviewRefreshJob` + ad-hoc refresh).
 - `standard_ledger:doctor` rake task (verifies trigger presence, etc.).
-- Install generator (`rails g standard_ledger:install`).
 - RSpec helpers: `post_ledger_entry` matcher, `with_modes` block, opt-in
   `require "standard_ledger/rspec"` auto-cleanup.
 

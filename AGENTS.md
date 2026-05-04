@@ -39,10 +39,13 @@ standard_ledger/
 │   ├── projection.rb     # Base class for class-form projectors
 │   └── modes/
 │       └── inline.rb     # `:inline` mode runtime — installs `after_create`, applies projections, coalesces multi-counter writes
+├── lib/generators/standard_ledger/install/
+│   ├── install_generator.rb       # `rails g standard_ledger:install`
+│   └── templates/initializer.rb.tt # Generated initializer with commented-out Config DSL
 └── spec/                 # RSpec tests
 ```
 
-The remaining modes (`async`, `sql`, `trigger`, `matview`), the `.rebuild!` / `.refresh!` APIs, and the install generator land in subsequent PRs — see `CHANGELOG.md` "Pending" for the complete list. `StandardLedger.post(EntryClass, kind:, targets:, attrs:)` ships in the same PR as the inline runtime.
+The remaining modes (`async`, `sql`, `trigger`, `matview`) and the `.rebuild!` / `.refresh!` APIs land in subsequent PRs — see `CHANGELOG.md` "Pending" for the complete list. `StandardLedger.post(EntryClass, kind:, targets:, attrs:)` ships in the same PR as the inline runtime.
 
 ## Key Patterns
 
