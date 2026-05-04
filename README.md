@@ -88,7 +88,19 @@ The gem is private during incubation. Pin from git:
 gem "standard_ledger", git: "https://github.com/rarebit-one/standard_ledger", ref: "<sha>"
 ```
 
-Then in `config/initializers/standard_ledger.rb`:
+Then run the install generator to drop a configured initializer in place:
+
+```bash
+bin/rails g standard_ledger:install
+```
+
+This writes `config/initializers/standard_ledger.rb` with commented-out
+examples covering every public `Config` setting — uncomment and edit only
+what you want to override. The generator is idempotent; re-running on an
+existing initializer skips with a clear message (pass `--force` to
+overwrite).
+
+A typical configuration looks like:
 
 ```ruby
 StandardLedger.configure do |c|
