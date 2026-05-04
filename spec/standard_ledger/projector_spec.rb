@@ -285,14 +285,27 @@ RSpec.describe StandardLedger::Projector do
   end
 
   describe ".standard_ledger_projections_for" do
-    it "filters projections by mode" do
+    it "filters projections by mode" do # rubocop:disable RSpec/ExampleLength
       noop = ->(_, _) { nil }
       # We can't use :inline here because Modes::Inline.install! requires
-      # AR; mix :async with :sql (neither has an install hook) instead.
+      # AR; :async has no install hook, and :sql's install hook also
+      # requires AR — register a :sql definition manually to keep this
+      # test plain-Ruby.
       entry_class.projects_onto(:voucher_scheme, mode: :async)    { on(:grant, &noop) }
       entry_class.projects_onto(:customer_profile, mode: :async)  { on(:grant, &noop) }
       entry_class.projects_onto(:order, mode: :async)             { on(:grant, &noop) }
-      entry_class.projects_onto(:voucher_scheme, mode: :sql)      { on(:grant, &noop) }
+      sql_definition = StandardLedger::Projector::Definition.new(
+        target_association: :voucher_scheme,
+        mode:               :sql,
+        projector_class:    nil,
+        handlers:           {},
+        guard:              nil,
+        lock:               nil,
+        permissive:         false,
+        recompute_sql:      "UPDATE voucher_schemes SET name = name WHERE id = :target_id",
+        options:            {}
+      )
+      entry_class.standard_ledger_projections = entry_class.standard_ledger_projections + [ sql_definition ]
 
       async = entry_class.standard_ledger_projections_for(:async)
       sql   = entry_class.standard_ledger_projections_for(:sql)
