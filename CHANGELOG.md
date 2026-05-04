@@ -116,6 +116,31 @@ project adheres to [Semantic Versioning](https://semver.org/).
   harness: multi-target fan-out, transactional rollback on projector
   raise, idempotent-retry projection skip, all three notifications,
   `lock: :pessimistic`, multi-counter coalescing, and Result interop.
+- `StandardLedger.rebuild!(EntryClass, target:, target_class:,
+  batch_size:)` log-replay path. Recomputes projections from the
+  entry log by delegating to the registered projector class's
+  `rebuild(target)`. Scope is one of: a single `target:` instance,
+  every row of `target_class:`, or (with neither) every projection
+  on the entry class for every target referenced by the log. Each
+  (target, projection) rebuild runs in its own transaction; per
+  design doc §5.5, failures mid-loop are NOT unwound across earlier
+  successes. Refuses block-form (delta) projections with
+  `StandardLedger::NotRebuildable`, and modes other than `:inline`
+  with `StandardLedger::Error` until their respective mode PRs land.
+  Returns a Result (or host's Result via the adapter) with
+  `projections[:rebuilt]` listing each (target_class, target_id,
+  projection) that was rebuilt.
+- `<prefix>.projection.rebuilt` notification fires for each
+  successful target rebuild. Payload `{ entry_class:, target:,
+  projection:, mode: }`. Joins the existing `entry.created`,
+  `projection.applied`, and `projection.failed` events under the
+  configured `notification_namespace`.
+- Integration spec
+  (`spec/standard_ledger/rebuild_integration_spec.rb`) covers the
+  end-to-end rebuild flow: 50-entry log replay restoring counters
+  after truncation, `target:` / `target_class:` / no-arg scoping,
+  block-form / no-`rebuild` / unsupported-mode raises, the
+  `projection.rebuilt` notification, and host Result interop.
 
 ## [0.1.0] — 2026-05-04
 
@@ -151,7 +176,6 @@ roadmap.
 - GitHub Actions CI on Ruby 3.4.4 running RSpec + RuboCop.
 
 ### Pending (tracked in design doc, lands in subsequent PRs)
-- `StandardLedger.rebuild!(EntryClass, target:)` log-replay path.
 - `StandardLedger.refresh!(:view_name)` ad-hoc matview refresh.
 - Remaining mode implementations: `:async` (`ProjectionJob` + `with_lock`),
   `:sql` (recompute via `update_all`), `:trigger` (host-owned, gem
