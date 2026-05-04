@@ -164,6 +164,119 @@ module StandardLedger
       overrides[entry_class]
     end
 
+    # Recompute projections from the entry log for one or more targets.
+    # The deterministic counterpart to `post`: instead of applying the
+    # delta from a single new entry, this replays the full log onto the
+    # target by delegating to the projector class's `rebuild(target)`.
+    #
+    # Scope (mutually exclusive — pass at most one):
+    #
+    # - `target:` — rebuild every projection whose `target_association`
+    #   resolves to `target.class`, for that single instance.
+    # - `target_class:` — rebuild every matching projection for every
+    #   target referenced by the log for that AR class, in `find_each`
+    #   batches. Targets with zero log entries are skipped (rebuilding a
+    #   target the log never touched would zero its counters — destructive
+    #   rather than corrective).
+    # - neither — rebuild every projection on `entry_class` for every
+    #   target referenced by the log.
+    #
+    # Per-mode rules:
+    #
+    # - `:inline` projections must be class-form (`via: ProjectorClass`)
+    #   AND that class must implement `rebuild`. Block-form projections
+    #   are delta-based — they cannot be reconstructed from the log
+    #   without the host providing a recompute path — so they raise
+    #   `StandardLedger::NotRebuildable` here.
+    # - `:async`, `:sql`, `:trigger`, `:matview` modes are not yet
+    #   supported by `rebuild!`; they raise `StandardLedger::Error`.
+    #   Each lands with its mode's own PR.
+    #
+    # Atomicity: each (target, projection) pair runs in its own
+    # transaction. A failure mid-loop is **not** rolled back — earlier
+    # successful rebuilds remain applied. Concurrent posts to the entry
+    # log during rebuild produce eventually-correct state: the rebuild
+    # operates on a snapshot of the log up to the projector's own
+    # SELECT, and any entries written after that snapshot project
+    # normally via the entry's own callback path. See design doc §5.5.
+    #
+    # @example rebuild a single target
+    #   StandardLedger.rebuild!(VoucherRecord, target: scheme)
+    #
+    # @example rebuild every scheme
+    #   StandardLedger.rebuild!(VoucherRecord, target_class: VoucherScheme)
+    #
+    # @example rebuild every projection across every target
+    #   StandardLedger.rebuild!(VoucherRecord)
+    #
+    # @param entry_class [Class] an `ActiveRecord::Base` subclass that
+    #   includes `StandardLedger::Projector`.
+    # @param target [ActiveRecord::Base, nil] one specific projection
+    #   target instance.
+    # @param target_class [Class, nil] rebuild for every target of this
+    #   AR class that the log references. Targets with zero log entries
+    #   are skipped.
+    # @param batch_size [Integer] passed to `find_each` when iterating
+    #   targets. Default 1000.
+    # @return [StandardLedger::Result, Object] success result with
+    #   `projections[:rebuilt] = [{ target_class:, target_id:,
+    #   projection: }, ...]`, one entry per (target, projection) pair
+    #   that ran. Failure result with `errors:` when any rebuild raises.
+    #   Returns the host's Result type when `Config#custom_result?` is
+    #   true, otherwise `StandardLedger::Result`.
+    # @raise [StandardLedger::NotRebuildable] when an applicable
+    #   projection has no rebuildable projector (block-form, or class
+    #   form whose `rebuild` raises `NotRebuildable`).
+    # @raise [StandardLedger::Error] when an applicable projection
+    #   declares a mode `rebuild!` does not yet support.
+    # @raise [ArgumentError] when both `target:` and `target_class:`
+    #   are supplied, when the entry class does not respond to
+    #   `standard_ledger_projections`, or when a non-nil scope
+    #   (`target:` / `target_class:`) matches no registered projection.
+    # @note Memory: when neither `target:` nor `target_class:` is given,
+    #   the no-scope and `target_class:` paths first load every distinct
+    #   foreign-key value from the log into memory via `distinct.pluck`
+    #   before batching the targets themselves. For very large logs,
+    #   prefer `target:` to scope to a single target rather than
+    #   rebuilding the full set.
+    def rebuild!(entry_class, target: nil, target_class: nil, batch_size: 1000)
+      if target && target_class
+        raise ArgumentError,
+              "rebuild! accepts at most one of `target:` or `target_class:` — got both"
+      end
+
+      unless entry_class.respond_to?(:standard_ledger_projections)
+        raise ArgumentError,
+              "#{entry_class.name || entry_class.inspect} does not include StandardLedger::Projector; " \
+              "rebuild! requires registered projections"
+      end
+
+      definitions = applicable_definitions_for_rebuild(entry_class, target: target, target_class: target_class)
+      validate_definitions_present!(entry_class, definitions, target: target, target_class: target_class)
+      rebuilt = []
+
+      definitions.each do |definition|
+        validate_rebuildable_mode!(entry_class, definition)
+        validate_rebuildable_projector!(entry_class, definition)
+
+        each_rebuild_target(entry_class, definition, target: target, batch_size: batch_size) do |t|
+          rebuild_one(entry_class, definition, t)
+          rebuilt << { target_class: t.class, target_id: t.id, projection: definition.target_association }
+        end
+      end
+
+      build_result(success: true, projections: { rebuilt: rebuilt })
+    rescue StandardLedger::Error, ArgumentError
+      # Programmer-error / unsupported-mode / not-rebuildable raises bubble
+      # up unchanged — these are deterministic, not data-dependent failures.
+      raise
+    rescue StandardError => e
+      # A projector raised mid-rebuild. Earlier successful rebuilds are
+      # NOT unwound (the contract is per-target transactional, not
+      # cross-target atomic) — we surface the failure but return.
+      build_result(success: false, errors: [ e.message ], projections: { rebuilt: rebuilt })
+    end
+
     private
 
     # Resolve the kind column name for an entry class. Falls back to `:kind`
@@ -197,6 +310,140 @@ module StandardLedger
       end
 
       assigned.merge(attrs)
+    end
+
+    # Filter the entry class's registered projections down to the set
+    # whose target association class matches the requested scope.
+    # When neither `target:` nor `target_class:` is supplied, every
+    # registered projection is in scope.
+    #
+    # @return [Array<Projector::Definition>]
+    def applicable_definitions_for_rebuild(entry_class, target:, target_class:)
+      requested_class = target_class || target&.class
+      return entry_class.standard_ledger_projections.dup if requested_class.nil?
+
+      entry_class.standard_ledger_projections.select do |definition|
+        association_target_class(entry_class, definition) == requested_class
+      end
+    end
+
+    # An empty `definitions` set means either (a) the host called
+    # `rebuild!` on an entry class that has no `projects_onto`
+    # declarations at all, or (b) a non-nil scope (`target:` /
+    # `target_class:`) was passed but no registered projection points at
+    # that AR class. Both are programmer errors — silently returning
+    # `Result.success` with `rebuilt: []` would let the mistake go
+    # undetected. Raise so the caller hears about it.
+    def validate_definitions_present!(entry_class, definitions, target:, target_class:)
+      return unless definitions.empty?
+
+      requested_class = target_class || target&.class
+
+      if requested_class
+        raise ArgumentError,
+              "#{entry_class.name} has no projections matching #{requested_class.name}; " \
+              "check the `projects_onto` declarations on #{entry_class.name}."
+      else
+        raise ArgumentError,
+              "#{entry_class.name} has no projections registered; " \
+              "add a `projects_onto` declaration before calling rebuild!."
+      end
+    end
+
+    # Resolve the AR class on the far side of a projection's
+    # `target_association`. Used to match `target:` / `target_class:`
+    # against registered projections.
+    def association_target_class(entry_class, definition)
+      reflection = entry_class.reflect_on_association(definition.target_association)
+      return nil if reflection.nil?
+
+      reflection.klass
+    end
+
+    # Refuse to rebuild for modes that don't yet implement the
+    # log-replay path. `:inline` is the only supported mode today;
+    # the rest land with their own mode PRs.
+    def validate_rebuildable_mode!(entry_class, definition)
+      return if definition.mode == :inline
+
+      raise StandardLedger::Error,
+            "rebuild! does not yet support mode: #{definition.mode.inspect} " \
+            "on #{entry_class.name}##{definition.target_association}; " \
+            "this mode's rebuild path lands in its own PR"
+    end
+
+    # Block-form `:inline` projections register per-kind handlers
+    # (e.g. `on(:grant) { increment(...) }`) that describe a delta.
+    # There's no general way to recompute the aggregate from the log
+    # without the host providing a recompute path — so we refuse
+    # rather than guess. Hosts who want this projection to be
+    # rebuildable should extract a `Projection` subclass and implement
+    # `rebuild(target)`.
+    def validate_rebuildable_projector!(entry_class, definition)
+      if definition.projector_class.nil?
+        raise StandardLedger::NotRebuildable,
+              "#{entry_class.name}##{definition.target_association} is a block-form projection " \
+              "and cannot be rebuilt from the entry log. Implement a Projection subclass with " \
+              "`rebuild(target)` and pass it via `via:` to make this projection rebuildable."
+      end
+
+      # Best-effort early detection: catches the common "host forgot to
+      # override `rebuild`" case before we iterate any targets. The owner
+      # check is fragile for projectors that inherit `rebuild` from an
+      # intermediate mixin/superclass — the inherited `rebuild` may still
+      # raise `NotRebuildable` at runtime. The authoritative gate is the
+      # base `Projection#rebuild` implementation, which raises
+      # `NotRebuildable` itself; the rescue clause in `rebuild!` re-raises
+      # it unchanged. So a fragility miss here just means the failure
+      # surfaces at iteration-time instead of pre-flight, which is
+      # acceptable for v0.1.
+      return if definition.projector_class.instance_method(:rebuild).owner != StandardLedger::Projection
+
+      raise StandardLedger::NotRebuildable,
+            "#{definition.projector_class.name}#rebuild is not implemented; " \
+            "override it to recompute #{entry_class.name}##{definition.target_association} " \
+            "from the entry log."
+    end
+
+    # Yield each target in scope for this projection's rebuild. With
+    # an explicit `target:` we yield once; with `target_class:` or no
+    # scope, we walk every distinct foreign-key value in the log and
+    # `find_each` the corresponding rows in batches.
+    def each_rebuild_target(entry_class, definition, target:, batch_size:)
+      if target
+        yield target
+        return
+      end
+
+      reflection = entry_class.reflect_on_association(definition.target_association)
+      target_klass = reflection.klass
+      foreign_key = reflection.foreign_key
+
+      # Pluck the distinct ids referenced by the log so we don't
+      # rebuild for targets that have no entries against them. Cast
+      # through `compact` to skip null FKs (legitimate when the entry
+      # has an `if:` guard that may not apply).
+      ids = entry_class.where.not(foreign_key => nil).distinct.pluck(foreign_key)
+      return if ids.empty?
+
+      target_klass.where(id: ids).find_each(batch_size: batch_size) do |t|
+        yield t
+      end
+    end
+
+    # Run a single (target, projection) rebuild inside its own
+    # transaction, then fire `<prefix>.projection.rebuilt` on success
+    # so observers can track per-target rebuild progress.
+    def rebuild_one(entry_class, definition, target)
+      target.class.transaction do
+        definition.projector_class.new.rebuild(target)
+      end
+
+      prefix = config.notification_namespace
+      ActiveSupport::Notifications.instrument(
+        "#{prefix}.projection.rebuilt",
+        entry_class: entry_class, target: target, projection: definition, mode: definition.mode
+      )
     end
 
     # Names of the `:inline`-mode projections that actually ran for this

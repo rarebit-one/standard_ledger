@@ -70,6 +70,37 @@ the INSERT — if any projection raises, the entry rolls back too. Posting
 twice with the same `serial_no` returns the original entry (with
 `idempotent? == true`) and skips the projection.
 
+Rebuild a target's projection from the log when its counters drift
+or a projection bug needs replaying — extract a `Projection` subclass
+that implements `rebuild(target)` and pass it via `via:`:
+
+```ruby
+class SchemeProjector < StandardLedger::Projection
+  def apply(scheme, entry)
+    scheme.increment(:"#{entry.action}_vouchers_count")
+    scheme.save!
+  end
+
+  def rebuild(scheme)
+    records = VoucherRecord.where(voucher_scheme_id: scheme.id)
+    scheme.update!(
+      granted_vouchers_count:  records.where(action: "grant").count,
+      redeemed_vouchers_count: records.where(action: "redeem").count
+    )
+  end
+end
+
+# Single target, single class, or every target across every projection.
+StandardLedger.rebuild!(VoucherRecord, target: scheme)
+StandardLedger.rebuild!(VoucherRecord, target_class: VoucherScheme)
+StandardLedger.rebuild!(VoucherRecord)
+```
+
+Each (target, projection) pair runs in its own transaction; failures
+mid-loop are not unwound. Block-form (delta) projections raise
+`NotRebuildable` because they cannot be reconstructed from the log
+without a host-supplied recompute path.
+
 Five projection modes — pick per declaration:
 
 | Mode | Where the work runs | Transactional? | Rebuildable? |

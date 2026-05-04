@@ -45,7 +45,9 @@ standard_ledger/
 └── spec/                 # RSpec tests
 ```
 
-The remaining modes (`async`, `sql`, `trigger`, `matview`) and the `.rebuild!` / `.refresh!` APIs land in subsequent PRs — see `CHANGELOG.md` "Pending" for the complete list. `StandardLedger.post(EntryClass, kind:, targets:, attrs:)` ships in the same PR as the inline runtime.
+`StandardLedger.rebuild!(EntryClass, target:, target_class:, batch_size:)` (in `lib/standard_ledger.rb`) drives the log-replay path: it dispatches to the registered projector class's `rebuild(target)` for each in-scope (target, projection) pair, fires `<prefix>.projection.rebuilt` per success, and refuses block-form (delta) projections plus modes other than `:inline` until their respective PRs land.
+
+The remaining modes (`async`, `sql`, `trigger`, `matview`) and the `.refresh!` API land in subsequent PRs — see `CHANGELOG.md` "Pending" for the complete list. `StandardLedger.post(EntryClass, kind:, targets:, attrs:)` ships in the same PR as the inline runtime.
 
 ## Key Patterns
 
@@ -119,7 +121,7 @@ A single host operation typically writes one of each, in one transaction. Neithe
 
 ## Test Strategy
 
-Specs are colocated by topic (`spec/standard_ledger/<topic>_spec.rb`). End-to-end coverage of the inline runtime lives in `spec/standard_ledger/inline_integration_spec.rb`, which exercises `StandardLedger.post` against the `spec/dummy/` SQLite harness — multi-target fan-out, transactional rollback, idempotent retry, all three notifications, `lock: :pessimistic`, multi-counter coalescing, and Result interop. The base of unit specs (`Config`, `Result`, `Entry`, `Projector`) covers the lower-level surfaces in isolation.
+Specs are colocated by topic (`spec/standard_ledger/<topic>_spec.rb`). End-to-end coverage of the inline runtime lives in `spec/standard_ledger/inline_integration_spec.rb`, which exercises `StandardLedger.post` against the `spec/dummy/` SQLite harness — multi-target fan-out, transactional rollback, idempotent retry, all three notifications, `lock: :pessimistic`, multi-counter coalescing, and Result interop. End-to-end coverage of the rebuild path lives in `spec/standard_ledger/rebuild_integration_spec.rb`, which replays a 50-entry log via a class-form projector to restore truncated counters, asserts the `target:` / `target_class:` / no-arg scoping rules, and verifies the `<prefix>.projection.rebuilt` notification, `NotRebuildable` for block-form projections, and `Error` for unsupported modes. The base of unit specs (`Config`, `Result`, `Entry`, `Projector`) covers the lower-level surfaces in isolation.
 
 ### Host-app helpers (`require "standard_ledger/rspec"`)
 
@@ -135,7 +137,6 @@ Future spec coverage (lands with the corresponding PRs):
 
 - `:async` mode transactional semantics (jobs enqueue at `after_create_commit`, with `with_lock` inside the job)
 - `:sql`/`:trigger`/`:matview` modes
-- `Projection.rebuild!` against synthetic logs
 - `:trigger` mode `doctor` rake task; `:matview` mode `CONCURRENTLY` refresh
 
 ## Conventions

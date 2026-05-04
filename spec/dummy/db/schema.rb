@@ -110,6 +110,8 @@ ActiveRecord::Schema.define do
     t.string  :name, null: false
     t.integer :granted_vouchers_count, null: false, default: 0
     t.integer :redeemed_vouchers_count, null: false, default: 0
+    t.integer :consumed_vouchers_count, null: false, default: 0
+    t.integer :clawed_back_vouchers_count, null: false, default: 0
     t.timestamps
   end
 
@@ -117,6 +119,8 @@ ActiveRecord::Schema.define do
     t.string  :name, null: false
     t.integer :granted_vouchers_count, null: false, default: 0
     t.integer :redeemed_vouchers_count, null: false, default: 0
+    t.integer :consumed_vouchers_count, null: false, default: 0
+    t.integer :clawed_back_vouchers_count, null: false, default: 0
     t.timestamps
   end
 
