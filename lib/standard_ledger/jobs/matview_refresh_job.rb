@@ -8,6 +8,13 @@ module StandardLedger
   # concern (the host's scheduler config has the wider context: queue routing,
   # recurring task DSL, etc.).
   #
+  # The job runs on ActiveJob's `:default` queue. Hosts running high-frequency
+  # refreshes (e.g. every minute) on a shared `:default` queue may want to
+  # isolate matview refreshes onto a dedicated queue so a slow refresh doesn't
+  # starve other latency-sensitive jobs — subclass and override `queue_as`
+  # (e.g. `queue_as :standard_ledger`) and point the scheduler at the
+  # subclass.
+  #
   # @example SolidQueue Recurring Tasks (config/recurring.yml)
   #   refresh_user_prompt_inventories:
   #     class: StandardLedger::MatviewRefreshJob

@@ -40,17 +40,30 @@ module StandardLedger
       # Issue `REFRESH MATERIALIZED VIEW [CONCURRENTLY] <view_name>` against
       # the active connection and emit the standard `<prefix>.projection.refreshed`
       # notification on success (or `<prefix>.projection.failed` on raise,
-      # before re-raising). The view name is interpolated as-is — callers
-      # are responsible for ensuring it's a trusted identifier (the gem
-      # owns this only via host-supplied DSL keywords).
+      # before re-raising). The view name is validated against a SQL-identifier
+      # regex at the boundary as a defence-in-depth check — the value normally
+      # comes from a `view:` DSL keyword in source code, but a careless host
+      # could pass through a config value or other untrusted string. Anything
+      # that isn't a bare or schema-qualified identifier raises.
+      #
+      # The default `:concurrent` strategy (and `concurrently: true` per-call)
+      # requires a unique index on the matview — Postgres rejects
+      # `REFRESH MATERIALIZED VIEW CONCURRENTLY` otherwise. Hosts who haven't
+      # added one should pass `concurrently: false` or set
+      # `Config#matview_refresh_strategy = :blocking`.
       #
       # @param view_name [String, Symbol] the materialized view to refresh.
+      #   Must match `/\A[a-zA-Z_][a-zA-Z0-9_.]*\z/` so a single dot is
+      #   permitted for `schema.view` qualified names.
       # @param concurrently [Boolean] when true, adds `CONCURRENTLY` (which
       #   requires a unique index on the view).
       # @return [void]
+      # @raise [ArgumentError] when `view_name` is not a valid SQL identifier.
       # @raise [StandardError] anything the connection raises while running
       #   the SQL — re-raised after the `failed` event fires.
-      def refresh!(view_name, concurrently:)
+      def self.refresh!(view_name, concurrently:)
+        validate_view_name!(view_name)
+
         prefix = StandardLedger.config.notification_namespace
         sql = build_refresh_sql(view_name, concurrently: concurrently)
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -63,6 +76,10 @@ module StandardLedger
           view: view_name.to_s, concurrently: concurrently, duration_ms: duration_ms
         )
       rescue StandardError => e
+        # ArgumentError from the validator should propagate without firing
+        # the failed notification — the SQL was never issued.
+        raise if e.is_a?(ArgumentError)
+
         ActiveSupport::Notifications.instrument(
           "#{prefix}.projection.failed",
           view: view_name.to_s, concurrently: concurrently, error: e
@@ -70,15 +87,29 @@ module StandardLedger
         raise
       end
 
-      private
+      # Reject anything that isn't a bare or schema-qualified SQL identifier
+      # — the matching regex allows a leading letter/underscore followed by
+      # alphanumerics, underscores, or a single dot for `schema.view`. Names
+      # containing semicolons, quotes, comment markers (`--`), whitespace, or
+      # other punctuation are rejected at the `refresh!` boundary so SQL
+      # injection isn't possible even when a host carelessly pipes a config
+      # value into the call.
+      def self.validate_view_name!(view_name)
+        return if view_name.to_s.match?(/\A[a-zA-Z_][a-zA-Z0-9_.]*\z/)
 
-      def build_refresh_sql(view_name, concurrently:)
+        raise ArgumentError,
+              "view_name must be a valid SQL identifier; got #{view_name.inspect}"
+      end
+      private_class_method :validate_view_name!
+
+      def self.build_refresh_sql(view_name, concurrently:)
         if concurrently
           "REFRESH MATERIALIZED VIEW CONCURRENTLY #{view_name}"
         else
           "REFRESH MATERIALIZED VIEW #{view_name}"
         end
       end
+      private_class_method :build_refresh_sql
     end
   end
 end

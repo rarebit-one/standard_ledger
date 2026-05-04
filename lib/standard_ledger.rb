@@ -191,9 +191,14 @@ module StandardLedger
     #   are delta-based — they cannot be reconstructed from the log
     #   without the host providing a recompute path — so they raise
     #   `StandardLedger::NotRebuildable` here.
-    # - `:async`, `:sql`, `:trigger`, `:matview` modes are not yet
-    #   supported by `rebuild!`; they raise `StandardLedger::Error`.
-    #   Each lands with its mode's own PR.
+    # - `:matview` projections rebuild by issuing a single
+    #   `REFRESH MATERIALIZED VIEW [CONCURRENTLY] <view>` — for matview,
+    #   refresh *is* rebuild. Postgres has no partial-refresh primitive,
+    #   so `target:` / `target_class:` scope arguments are ignored for
+    #   `:matview` projections and the full view is always refreshed.
+    # - `:async`, `:sql`, `:trigger` modes are not yet supported by
+    #   `rebuild!`; they raise `StandardLedger::Error`. Each lands with
+    #   its mode's own PR.
     #
     # Atomicity: each (target, projection) pair runs in its own
     # transaction. A failure mid-loop is **not** rolled back — earlier
@@ -324,7 +329,7 @@ module StandardLedger
     #   `<prefix>.projection.failed` event fires.
     def refresh!(view_name, concurrently: nil)
       effective = effective_concurrent_flag(concurrently)
-      Modes::Matview.new.refresh!(view_name, concurrently: effective)
+      Modes::Matview.refresh!(view_name, concurrently: effective)
       build_result(
         success: true,
         projections: { refreshed: [ { view: view_name.to_s, concurrently: effective } ] }
@@ -433,9 +438,9 @@ module StandardLedger
     # state for every target in a single relation, so one refresh is the
     # entire rebuild.
     def rebuild_matview_definition(definition)
-      concurrently = definition.refresh_options.is_a?(Hash) ? definition.refresh_options[:concurrently] : nil
+      concurrently = definition.refresh_options[:concurrently]
       effective = effective_concurrent_flag(concurrently)
-      Modes::Matview.new.refresh!(definition.view, concurrently: effective)
+      Modes::Matview.refresh!(definition.view, concurrently: effective)
     end
 
     # Reduce the public `concurrently:` parameter to a Boolean by reading

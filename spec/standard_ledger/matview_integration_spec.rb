@@ -198,6 +198,59 @@ RSpec.describe "StandardLedger matview mode (end-to-end)" do
       ])
     end
 
+    describe "view_name validation" do
+      it "accepts a valid bare identifier" do
+        expect {
+          StandardLedger.refresh!("user_prompt_inventories", concurrently: false)
+        }.not_to raise_error
+      end
+
+      it "accepts a schema-qualified identifier (schema.view)" do
+        expect {
+          StandardLedger.refresh!("reporting.user_prompt_inventories", concurrently: false)
+        }.not_to raise_error
+      end
+
+      it "rejects a name containing a semicolon" do
+        expect {
+          StandardLedger.refresh!("user_prompt_inventories; DROP TABLE users", concurrently: false)
+        }.to raise_error(ArgumentError, /valid SQL identifier/)
+      end
+
+      it "rejects a name containing a double quote" do
+        expect {
+          StandardLedger.refresh!('user"_inventories', concurrently: false)
+        }.to raise_error(ArgumentError, /valid SQL identifier/)
+      end
+
+      it "rejects a name containing a single quote" do
+        expect {
+          StandardLedger.refresh!("user'_inventories", concurrently: false)
+        }.to raise_error(ArgumentError, /valid SQL identifier/)
+      end
+
+      it "rejects a name containing -- (SQL comment marker)" do
+        expect {
+          StandardLedger.refresh!("foo--bar", concurrently: false)
+        }.to raise_error(ArgumentError, /valid SQL identifier/)
+      end
+
+      it "does not fire the failed notification when validation rejects the name" do
+        events = []
+        sub = ActiveSupport::Notifications.subscribe("standard_ledger.projection.failed") do |*args|
+          events << ActiveSupport::Notifications::Event.new(*args).payload
+        end
+
+        expect {
+          StandardLedger.refresh!("foo;bar", concurrently: false)
+        }.to raise_error(ArgumentError)
+
+        expect(events).to be_empty
+      ensure
+        ActiveSupport::Notifications.unsubscribe(sub) if sub
+      end
+    end
+
     describe "instrumentation" do
       it "fires <prefix>.projection.refreshed with view + duration on success" do
         events = []
@@ -307,6 +360,39 @@ RSpec.describe "StandardLedger matview mode (end-to-end)" do
       expect(events.first[:view]).to eq("user_prompt_inventories")
     ensure
       ActiveSupport::Notifications.unsubscribe(sub) if sub
+    end
+
+    describe "scope arguments are ignored for :matview projections" do
+      # Postgres has no partial-refresh primitive — passing target: or
+      # target_class: cannot narrow the refresh, so we always issue the
+      # full REFRESH MATERIALIZED VIEW. These specs lock that contract.
+
+      it "ignores target: and still issues the full REFRESH for the view" do
+        profile = UserProfile.create!(name: "P-scope")
+
+        result = StandardLedger.rebuild!(PromptTxn, target: profile)
+
+        expect(executed_sql).to eq([ "REFRESH MATERIALIZED VIEW CONCURRENTLY user_prompt_inventories" ])
+        expect(result).to be_success
+      end
+
+      it "ignores target_class: and still issues the full REFRESH for the view" do
+        result = StandardLedger.rebuild!(PromptTxn, target_class: UserProfile)
+
+        expect(executed_sql).to eq([ "REFRESH MATERIALIZED VIEW CONCURRENTLY user_prompt_inventories" ])
+        expect(result).to be_success
+      end
+    end
+
+    describe "failure path when refresh raises" do
+      it "returns Result.failure with the error message in errors" do
+        allow(ActiveRecord::Base.connection).to receive(:execute).and_raise(StandardError, "matview boom")
+
+        result = StandardLedger.rebuild!(PromptTxn)
+
+        expect(result).to be_failure
+        expect(result.errors).to include(/matview boom/)
+      end
     end
   end
 end
