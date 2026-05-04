@@ -5,6 +5,7 @@ SimpleCov.start do
 end
 
 require "standard_ledger"
+require "standard_ledger/rspec"
 
 require_relative "dummy/config/database"
 ActiveRecord::Schema.verbose = false
@@ -21,8 +22,4 @@ RSpec.configure do |config|
 
   config.order = :random
   Kernel.srand config.seed
-
-  config.before do
-    StandardLedger.reset!
-  end
 end

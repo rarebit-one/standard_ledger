@@ -121,6 +121,16 @@ A single host operation typically writes one of each, in one transaction. Neithe
 
 Specs are colocated by topic (`spec/standard_ledger/<topic>_spec.rb`). End-to-end coverage of the inline runtime lives in `spec/standard_ledger/inline_integration_spec.rb`, which exercises `StandardLedger.post` against the `spec/dummy/` SQLite harness — multi-target fan-out, transactional rollback, idempotent retry, all three notifications, `lock: :pessimistic`, multi-counter coalescing, and Result interop. The base of unit specs (`Config`, `Result`, `Entry`, `Projector`) covers the lower-level surfaces in isolation.
 
+### Host-app helpers (`require "standard_ledger/rspec"`)
+
+Host apps opt into the gem's RSpec support by adding `require "standard_ledger/rspec"` to their `spec/rails_helper.rb`. Loading that file:
+
+- Registers a `before(:each)` hook that calls `StandardLedger.reset!`, which clears `StandardLedger.config` and the thread-local `with_modes` override map between examples.
+- Defines the `post_ledger_entry(EntryClass).with(kind:, targets:, attrs:)` block matcher — subscribes to `<namespace>.entry.created`, captures every event fired during the block, and asserts (or refutes, when negated) that a matching event was emitted.
+- Auto-includes `StandardLedger::RSpec::Helpers` into every example group, exposing `with_modes(...)` as sugar over `StandardLedger.with_modes`.
+
+`StandardLedger.with_modes(EntryClass => :inline) { ... }` writes its overrides into a thread-local hash; mode strategies will consult `StandardLedger.mode_override_for(entry_class)` once `Modes::Async` ships. Today (only `:inline` exists) it's effectively a no-op for already-inline projections — the API lands now so async-mode specs can opt into the inline path the moment the strategy ships.
+
 Future spec coverage (lands with the corresponding PRs):
 
 - `:async` mode transactional semantics (jobs enqueue at `after_create_commit`, with `with_lock` inside the job)

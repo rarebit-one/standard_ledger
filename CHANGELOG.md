@@ -13,6 +13,25 @@ project adheres to [Semantic Versioning](https://semver.org/).
   matview strategy, notification namespace, host Result interop). The
   generator is idempotent — re-running on an existing initializer skips
   with a clear message; pass `--force` to overwrite.
+- RSpec helpers behind an opt-in `require "standard_ledger/rspec"` (typically
+  loaded from the host's `spec/rails_helper.rb`):
+  - `post_ledger_entry(EntryClass).with(kind:, targets:, attrs:)` block
+    matcher — subscribes to `<namespace>.entry.created` for the duration of
+    the block and asserts that a matching event fired (or, in the negated
+    form, that none did). Honors a custom `notification_namespace`.
+  - `StandardLedger.with_modes(EntryClass => :inline) { ... }` block —
+    captures a thread-local override map so future async-mode projections
+    can be forced inline inside the block. Restored on block exit
+    (including on exception); nested blocks compose;
+    `StandardLedger.reset_mode_overrides!` clears the map (the auto-cleanup
+    hook calls this so host-configured Config survives between examples).
+    `StandardLedger.mode_override_for(entry_class)` reads the active
+    override for use by mode strategies as they ship. The `with_modes`
+    sugar is auto-included into RSpec example groups via
+    `StandardLedger::RSpec::Helpers`.
+  - Auto-cleanup hook (`RSpec.configure { before(:each) { StandardLedger.reset_mode_overrides! } }`)
+    so per-spec override state doesn't leak between examples without
+    clobbering the host's initializer-level Config.
 - `StandardLedger::Entry` runtime: read-only enforcement after persistence
   (`save`/`update`/`destroy` raise `ActiveRecord::ReadOnlyRecord` when
   `immutable: true`, the default). `immutable: false` opts out.
@@ -138,8 +157,6 @@ roadmap.
   `:sql` (recompute via `update_all`), `:trigger` (host-owned, gem
   records rebuild SQL), `:matview` (`MatviewRefreshJob` + ad-hoc refresh).
 - `standard_ledger:doctor` rake task (verifies trigger presence, etc.).
-- RSpec helpers: `post_ledger_entry` matcher, `with_modes` block, opt-in
-  `require "standard_ledger/rspec"` auto-cleanup.
 
 [Unreleased]: https://github.com/rarebit-one/standard_ledger/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/rarebit-one/standard_ledger/releases/tag/v0.1.0
