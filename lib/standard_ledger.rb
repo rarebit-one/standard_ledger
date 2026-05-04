@@ -25,7 +25,8 @@ require "standard_ledger/engine" if defined?(::Rails::Engine)
 #   StandardLedger.post(EntryClass, ...)   # write an entry + project
 #   StandardLedger.rebuild!(EntryClass)    # recompute projections from log
 #   StandardLedger.refresh!(:view_name)    # ad-hoc matview refresh
-#   StandardLedger.reset!                  # test helper
+#   StandardLedger.reset!                  # full test helper (wipes config + overrides)
+#   StandardLedger.reset_mode_overrides!   # clears only the with_modes thread-local
 module StandardLedger
   class << self
     # Configure the gem once per app, typically from
@@ -39,8 +40,24 @@ module StandardLedger
       @config ||= Config.new
     end
 
+    # Full reset: clears the cached `Config` AND any thread-local `with_modes`
+    # overrides. Use this when a spec needs to verify the gem's boot path or
+    # when the host has *not* installed a Rails initializer (so wiping
+    # `@config` is harmless). Hosts that *do* configure the gem in an
+    # initializer should not call this between examples — use
+    # `reset_mode_overrides!` instead, which the auto-cleanup hook already
+    # invokes.
     def reset!
       @config = nil
+      reset_mode_overrides!
+    end
+
+    # Test-friendly reset that only clears the thread-local `with_modes`
+    # override map, leaving `Config` intact. The `standard_ledger/rspec`
+    # auto-cleanup hook calls this in `before(:each)` so a host's initializer
+    # config (e.g. a configured `result_adapter`) survives across examples
+    # while per-example mode overrides still get torn down cleanly.
+    def reset_mode_overrides!
       Thread.current[:standard_ledger_mode_overrides] = nil
     end
 
@@ -89,6 +106,62 @@ module StandardLedger
       )
     rescue ActiveRecord::RecordInvalid => e
       build_result(success: false, entry: e.record, errors: e.record.errors.full_messages)
+    end
+
+    # Force specific entry classes' projections to run in the supplied mode
+    # for the duration of the block. Intended for tests that want to drive an
+    # async-mode projection inline so the spec doesn't need a job runner.
+    #
+    # The override map is stored thread-locally so concurrent specs (or the
+    # gem's own `:async` workers) don't observe each other's overrides. Mode
+    # strategies consult `StandardLedger.mode_override_for(entry_class)`
+    # before falling back to the projection's declared mode.
+    #
+    # The block's prior override map is restored on exit, including on
+    # exception, so nested `with_modes` calls compose cleanly: the inner
+    # block's keys win during its scope, then the outer map is restored
+    # untouched.
+    #
+    # Today only `:inline` exists as a real mode, so this is a no-op for
+    # already-inline projections. The hook lands now so async projections
+    # can opt into the inline path the moment `Modes::Async` ships.
+    #
+    # @example
+    #   StandardLedger.with_modes(PaymentRecord => :inline) do
+    #     Orders::CheckoutOperation.call(...)
+    #   end
+    #
+    # @example string keys (resolved via const_get)
+    #   StandardLedger.with_modes("PaymentRecord" => :inline) do
+    #     ...
+    #   end
+    #
+    # @param overrides [Hash{Class, String, Symbol => Symbol}] entry class (or
+    #   constant name / underscored symbol) → forced mode symbol.
+    def with_modes(overrides)
+      resolved = resolve_mode_overrides(overrides)
+
+      prior = Thread.current[:standard_ledger_mode_overrides]
+      merged = (prior || {}).merge(resolved)
+      Thread.current[:standard_ledger_mode_overrides] = merged
+
+      yield
+    ensure
+      Thread.current[:standard_ledger_mode_overrides] = prior
+    end
+
+    # Read the active override (if any) for `entry_class`. Mode strategies
+    # call this in their `install!` / `#call` paths before deciding whether
+    # to dispatch to the declared mode or the override mode. Returns `nil`
+    # outside any `with_modes` block.
+    #
+    # @param entry_class [Class] the host entry class.
+    # @return [Symbol, nil] the override mode, or `nil` for "no override".
+    def mode_override_for(entry_class)
+      overrides = Thread.current[:standard_ledger_mode_overrides]
+      return nil if overrides.nil?
+
+      overrides[entry_class]
     end
 
     private
@@ -157,78 +230,30 @@ module StandardLedger
       end
     end
 
-    public
-
-    # Force specific entry classes' projections to run in the supplied mode
-    # for the duration of the block. Intended for tests that want to drive an
-    # async-mode projection inline so the spec doesn't need a job runner.
-    #
-    # The override map is stored thread-locally so concurrent specs (or the
-    # gem's own `:async` workers) don't observe each other's overrides. Mode
-    # strategies consult `StandardLedger.mode_override_for(entry_class)`
-    # before falling back to the projection's declared mode.
-    #
-    # The block's prior override map is restored on exit, including on
-    # exception, so nested `with_modes` calls compose cleanly: the inner
-    # block's keys win during its scope, then the outer map is restored
-    # untouched.
-    #
-    # Today only `:inline` exists as a real mode, so this is a no-op for
-    # already-inline projections. The hook lands now so async projections
-    # can opt into the inline path the moment `Modes::Async` ships.
-    #
-    # @example
-    #   StandardLedger.with_modes(PaymentRecord => :inline) do
-    #     Orders::CheckoutOperation.call(...)
-    #   end
-    #
-    # @example string keys (resolved via const_get)
-    #   StandardLedger.with_modes("PaymentRecord" => :inline) do
-    #     ...
-    #   end
-    #
-    # @param overrides [Hash{Class, String, Symbol => Symbol}] entry class (or
-    #   constant name / underscored symbol) → forced mode symbol.
-    def with_modes(overrides)
-      resolved = resolve_mode_overrides(overrides)
-
-      prior = Thread.current[:standard_ledger_mode_overrides]
-      merged = (prior || {}).merge(resolved)
-      Thread.current[:standard_ledger_mode_overrides] = merged
-
-      yield
-    ensure
-      Thread.current[:standard_ledger_mode_overrides] = prior
-    end
-
-    # Read the active override (if any) for `entry_class`. Mode strategies
-    # call this in their `install!` / `#call` paths before deciding whether
-    # to dispatch to the declared mode or the override mode. Returns `nil`
-    # outside any `with_modes` block.
-    #
-    # @param entry_class [Class] the host entry class.
-    # @return [Symbol, nil] the override mode, or `nil` for "no override".
-    def mode_override_for(entry_class)
-      overrides = Thread.current[:standard_ledger_mode_overrides]
-      return nil if overrides.nil?
-
-      overrides[entry_class]
-    end
-
-    private
-
     # Resolve override-map keys to actual class constants so callers can
     # write `with_modes(PaymentRecord => :inline)` *or*
     # `with_modes(:payment_record => :inline)`. The String/Symbol form uses
     # `String#classify` then `Object.const_get`; the Class form is passed
     # through verbatim. Anything else raises so the caller fixes the typo
     # rather than silently storing a key that nothing will ever match.
+    #
+    # An unresolvable String/Symbol key (typo: `:payment_recrd`) is caught
+    # and re-raised as `ArgumentError` with a `with_modes:`-prefixed message
+    # naming the offending key, rather than leaking `const_get`'s bare
+    # `NameError: uninitialized constant ...`.
     def resolve_mode_overrides(overrides)
       overrides.each_with_object({}) do |(key, mode), memo|
         klass =
           case key
-          when Class then key
-          when String, Symbol then Object.const_get(key.to_s.classify)
+          when Class
+            key
+          when String, Symbol
+            begin
+              Object.const_get(key.to_s.classify)
+            rescue NameError
+              raise ArgumentError,
+                    "with_modes: could not resolve #{key.inspect} to a constant"
+            end
           else
             raise ArgumentError,
                   "with_modes: expected Class, String, or Symbol key; got #{key.inspect}"

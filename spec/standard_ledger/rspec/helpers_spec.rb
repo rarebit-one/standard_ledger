@@ -88,6 +88,18 @@ RSpec.describe "StandardLedger.with_modes" do
     }.to raise_error(ArgumentError, /Class, String, or Symbol/)
   end
 
+  it "raises a clear ArgumentError when a symbol key doesn't resolve to a constant" do
+    expect {
+      StandardLedger.with_modes(payment_recrd: :inline) { }
+    }.to raise_error(ArgumentError, /with_modes: could not resolve :payment_recrd to a constant/)
+  end
+
+  it "raises a clear ArgumentError when a string key doesn't resolve to a constant" do
+    expect {
+      StandardLedger.with_modes("PaymentRecrd" => :inline) { }
+    }.to raise_error(ArgumentError, /with_modes: could not resolve "PaymentRecrd" to a constant/)
+  end
+
   it "isolates overrides between threads" do
     outer_thread_captured = nil
     other_thread_captured = nil
@@ -109,6 +121,14 @@ RSpec.describe "StandardLedger.with_modes" do
     Thread.current[:standard_ledger_mode_overrides] = { VoucherRecord => :inline }
 
     StandardLedger.reset!
+
+    expect(StandardLedger.mode_override_for(VoucherRecord)).to be_nil
+  end
+
+  it "is wiped by StandardLedger.reset_mode_overrides!" do
+    Thread.current[:standard_ledger_mode_overrides] = { VoucherRecord => :inline }
+
+    StandardLedger.reset_mode_overrides!
 
     expect(StandardLedger.mode_override_for(VoucherRecord)).to be_nil
   end

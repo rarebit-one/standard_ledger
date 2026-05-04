@@ -144,6 +144,12 @@ RSpec.describe "post_ledger_entry matcher" do
   end
 
   describe "namespace customisation" do
+    # The auto-cleanup hook preserves Config across examples so a host's
+    # Rails initializer config survives. Tests in this group mutate the
+    # global `notification_namespace`, so they must reset it themselves to
+    # avoid leaking into other specs.
+    after { StandardLedger.reset! }
+
     it "honors a custom notification_namespace" do
       StandardLedger.configure { |c| c.notification_namespace = "host.ledger" }
 
