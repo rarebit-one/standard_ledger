@@ -51,6 +51,25 @@ class VoucherRecord < ApplicationRecord
 end
 ```
 
+Post an entry with the module API (sugar over `VoucherRecord.create!`):
+
+```ruby
+result = StandardLedger.post(VoucherRecord,
+  kind:    :grant,
+  targets: { voucher_scheme: scheme, customer_profile: profile },
+  attrs:   { organisation_id: org.id, serial_no: "v-2025-1" })
+
+result.success?     # => true
+result.entry        # => the persisted VoucherRecord
+result.idempotent?  # => false (true on retry against the same serial_no)
+result.projections  # => { inline: [:voucher_scheme, :customer_profile] }
+```
+
+Counters on both targets are incremented inside the same transaction as
+the INSERT — if any projection raises, the entry rolls back too. Posting
+twice with the same `serial_no` returns the original entry (with
+`idempotent? == true`) and skips the projection.
+
 Five projection modes — pick per declaration:
 
 | Mode | Where the work runs | Transactional? | Rebuildable? |

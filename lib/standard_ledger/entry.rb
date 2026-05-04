@@ -135,8 +135,17 @@ module StandardLedger
       # not some other unique constraint on the table (surrogate key,
       # business column, etc.). The wrapped DB exception's message usually
       # mentions the index name or the column list — a substring match on
-      # each idempotency column name is good enough across PG/MySQL/SQLite
-      # without parsing vendor-specific formats.
+      # each idempotency column name is good enough across PostgreSQL and
+      # SQLite without parsing vendor-specific formats.
+      #
+      # Adapter caveat: MySQL's unique-violation message contains only the
+      # index name (e.g. `Duplicate entry 'val' for key 'idx_name'`), not
+      # the column list. So this check returns false on MySQL unless the
+      # index is named after its columns. The fail-closed behavior re-raises
+      # the original RecordNotUnique, which is the correct outcome for an
+      # unrecognized violation — never the wrong one for a misclassified
+      # one. None of the host apps target MySQL today; revisit if that
+      # changes.
       def standard_ledger_idempotency_violation?(exception)
         config = standard_ledger_entry_config
         columns = (config[:scope] + [ config[:idempotency_key] ]).map(&:to_s)
@@ -160,6 +169,15 @@ module StandardLedger
       if respond_to?(:before_destroy)
         before_destroy :standard_ledger_raise_readonly, if: :standard_ledger_immutable?
       end
+
+      # Emit `<namespace>.entry.created` after the row is durably committed
+      # so subscribers (audit logs, metric pipelines) see it only when the
+      # entry is real. Idempotent returns from `create!`'s rescue do not
+      # fire `after_commit on: :create` (no INSERT happened), which is the
+      # correct behavior: the original write fired the event already.
+      if respond_to?(:after_commit)
+        after_commit :standard_ledger_emit_entry_created, on: :create
+      end
     end
 
     # Returns true when this row was returned from an idempotent `create!`
@@ -179,6 +197,34 @@ module StandardLedger
       !new_record?
     end
 
+    # Returns the entry's belongs_to targets keyed by association name.
+    # Used by the `entry.created` notification payload and by
+    # `StandardLedger.post`'s telemetry. Skips polymorphic and missing
+    # associations so the payload only includes what's actually present.
+    #
+    # Performance trade-off: this fires from `after_commit`, where AR may
+    # have cleared the association cache. Each `public_send(reflection.name)`
+    # can therefore issue a SELECT to reload the cached target. For the
+    # typical 1–2 belongs_to entry, that's negligible. If profiling on a
+    # high-cardinality entry shows this matters, capture targets earlier
+    # (e.g. in `before_create`) and stash them on the instance — deferred
+    # to a future PR. Notably, an inline-mode caller has already resolved
+    # these targets by the time `after_commit` runs, so the SELECTs would
+    # only happen for entries with belongs_to associations that are *not*
+    # registered as projection targets.
+    #
+    # @return [Hash{Symbol => ActiveRecord::Base}]
+    def standard_ledger_targets
+      return {} unless self.class.respond_to?(:reflect_on_all_associations)
+
+      self.class.reflect_on_all_associations(:belongs_to).each_with_object({}) do |reflection, memo|
+        next if reflection.polymorphic?
+
+        target = public_send(reflection.name)
+        memo[reflection.name] = target unless target.nil?
+      end
+    end
+
     private
 
     def standard_ledger_immutable?
@@ -188,6 +234,20 @@ module StandardLedger
 
     def standard_ledger_raise_readonly
       raise ActiveRecord::ReadOnlyRecord
+    end
+
+    # Publish `<namespace>.entry.created` once the row is durably committed.
+    # `after_commit on: :create` only fires for real INSERTs, so idempotent
+    # returns from the `create!` rescue path are correctly skipped.
+    def standard_ledger_emit_entry_created
+      config = self.class.standard_ledger_entry_config
+      kind_value = config ? public_send(config[:kind]) : nil
+      prefix = StandardLedger.config.notification_namespace
+
+      ActiveSupport::Notifications.instrument(
+        "#{prefix}.entry.created",
+        entry: self, kind: kind_value, targets: standard_ledger_targets
+      )
     end
   end
 end

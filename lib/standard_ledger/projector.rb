@@ -98,7 +98,23 @@ module StandardLedger
         )
 
         self.standard_ledger_projections = standard_ledger_projections + [ definition ]
+        install_mode_callbacks_for(definition)
         definition
+      end
+
+      # Delegate per-mode callback installation to the matching strategy
+      # class. Keeps `Modes::*` from reaching into `Projector`'s internals
+      # — each strategy gets a chance to wire up `after_create`,
+      # `after_create_commit`, or whatever lifecycle hook it needs the first
+      # time a projection of its mode is registered on this class.
+      #
+      # @param definition [Definition]
+      # @return [void]
+      def install_mode_callbacks_for(definition)
+        case definition.mode
+        when :inline
+          StandardLedger::Modes::Inline.install!(self)
+        end
       end
 
       # Filter the registered projections by mode. Used by the per-mode
@@ -119,30 +135,36 @@ module StandardLedger
     end
 
     # Apply a single projection definition to this entry. Resolves the
-    # target association, looks up the per-kind handler (or falls back to
-    # the projector class), and invokes it — optionally inside
-    # `target.with_lock` when `lock: :pessimistic` was declared.
+    # target association, evaluates the optional `if:` guard, looks up the
+    # per-kind handler (or falls back to the projector class), and invokes
+    # it.
     #
-    # The mode strategies (`Modes::Inline`, `Modes::Async`, ...) call this
-    # method; hosts typically do not call it directly.
+    # `lock:` is interpreted by the mode strategies (`Modes::Inline`, ...)
+    # — not here. The inline strategy needs the lock to span both the
+    # handler invocation *and* the coalesced `target.save!`, so it wraps
+    # an entire per-target group rather than a single `apply_projection!`
+    # call. See `Modes::Inline#call` for the lock-spans-save guarantee.
+    #
+    # The mode strategies call this method; hosts typically do not call it
+    # directly.
     #
     # @param definition [Definition] one of the entry class's registered
     #   projections.
-    # @return [void]
+    # @return [Boolean] `true` when the handler (or projector class) ran;
+    #   `false` when the projection short-circuited (guard returned false,
+    #   target was nil, or permissive mode found no matching handler).
     # @raise [StandardLedger::Error] when the entry's kind column is nil.
     # @raise [StandardLedger::UnhandledKind] when no handler matches and
     #   `permissive: false`.
     def apply_projection!(definition)
-      return if definition.guard && !instance_exec(&definition.guard)
+      return false if definition.guard && !instance_exec(&definition.guard)
 
       target = public_send(definition.target_association)
-      return if target.nil?
+      return false if target.nil?
 
       if definition.projector_class
-        invoke_with_optional_lock(target, definition.lock) do
-          definition.projector_class.new.apply(target, self)
-        end
-        return
+        definition.projector_class.new.apply(target, self)
+        return true
       end
 
       kind = resolve_kind!
@@ -151,16 +173,15 @@ module StandardLedger
       if handler.nil?
         if definition.permissive
           handler = definition.handlers[:_]
-          return if handler.nil?
+          return false if handler.nil?
         else
           raise UnhandledKind,
                 "#{self.class.name} has no handler for kind=#{kind.inspect} on projection :#{definition.target_association}"
         end
       end
 
-      invoke_with_optional_lock(target, definition.lock) do
-        handler.call(target, self)
-      end
+      handler.call(target, self)
+      true
     end
 
     private
@@ -179,14 +200,6 @@ module StandardLedger
               "#{self.class.name} entry has nil kind (column #{kind_column.inspect}); cannot dispatch projection"
       end
       kind
-    end
-
-    def invoke_with_optional_lock(target, lock)
-      if lock == :pessimistic
-        target.with_lock { yield }
-      else
-        yield
-      end
     end
 
     # Internal collector for the block-DSL form. Captures `on(:kind)` calls
