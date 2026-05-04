@@ -37,18 +37,23 @@ standard_ledger/
 │   ├── entry.rb          # `include StandardLedger::Entry` concern
 │   ├── projector.rb      # `include StandardLedger::Projector` concern + `projects_onto` DSL
 │   ├── projection.rb     # Base class for class-form projectors
-│   └── modes/
-│       ├── inline.rb     # `:inline` mode runtime — installs `after_create`, applies projections, coalesces multi-counter writes
-│       └── sql.rb        # `:sql` mode runtime — installs `after_create`, runs the recompute SQL with `:target_id` bound from the entry's FK
+│   ├── modes/
+│   │   ├── inline.rb     # `:inline` mode runtime — installs `after_create`, applies projections, coalesces multi-counter writes
+│   │   ├── sql.rb        # `:sql` mode runtime — installs `after_create`, runs the recompute SQL with `:target_id` bound from the entry's FK
+│   │   └── matview.rb    # `:matview` mode runtime — issues `REFRESH MATERIALIZED VIEW [CONCURRENTLY]`, no per-entry callback
+│   └── jobs/
+│       └── matview_refresh_job.rb # ActiveJob wrapper around `StandardLedger.refresh!` for hosts to schedule
 ├── lib/generators/standard_ledger/install/
 │   ├── install_generator.rb       # `rails g standard_ledger:install`
 │   └── templates/initializer.rb.tt # Generated initializer with commented-out Config DSL
 └── spec/                 # RSpec tests
 ```
 
-`StandardLedger.rebuild!(EntryClass, target:, target_class:, batch_size:)` (in `lib/standard_ledger.rb`) drives the log-replay path: for `:inline` projections it dispatches to the registered projector class's `rebuild(target)`; for `:sql` projections it runs the recompute SQL with `:target_id` bound to each target. Fires `<prefix>.projection.rebuilt` per success, refuses block-form (delta) `:inline` projections, and refuses modes whose rebuild path hasn't shipped yet.
+`StandardLedger.rebuild!(EntryClass, target:, target_class:, batch_size:)` (in `lib/standard_ledger.rb`) drives the log-replay path: for `:inline` projections it dispatches to the registered projector class's `rebuild(target)` (firing `<prefix>.projection.rebuilt` per success); for `:sql` projections it runs the recompute SQL with `:target_id` bound to each target; for `:matview` projections it issues a single `REFRESH MATERIALIZED VIEW [CONCURRENTLY] <view>` (firing `<prefix>.projection.refreshed`) — refresh *is* rebuild for matview. It refuses block-form (delta) `:inline` projections plus modes other than `:inline`/`:sql`/`:matview` until their respective PRs land.
 
-The remaining modes (`async`, `trigger`, `matview`) and the `.refresh!` API land in subsequent PRs — see `CHANGELOG.md` "Pending" for the complete list. `StandardLedger.post(EntryClass, kind:, targets:, attrs:)` ships in the same PR as the inline runtime.
+`StandardLedger.refresh!(view_name, concurrently: nil)` is the ad-hoc matview refresh API for hosts that need immediate read-your-write semantics (e.g. at the end of an operation, before the next scheduled refresh would otherwise show stale counts). `StandardLedger::MatviewRefreshJob` is the ActiveJob wrapper hosts point their scheduler (SolidQueue Recurring Tasks, sidekiq-cron, etc.) at.
+
+The remaining modes (`async`, `trigger`) land in subsequent PRs — see `CHANGELOG.md` "Pending" for the complete list. `StandardLedger.post(EntryClass, kind:, targets:, attrs:)` ships in the same PR as the inline runtime.
 
 ## Key Patterns
 
@@ -122,7 +127,7 @@ A single host operation typically writes one of each, in one transaction. Neithe
 
 ## Test Strategy
 
-Specs are colocated by topic (`spec/standard_ledger/<topic>_spec.rb`). End-to-end coverage of the inline runtime lives in `spec/standard_ledger/inline_integration_spec.rb`, which exercises `StandardLedger.post` against the `spec/dummy/` SQLite harness — multi-target fan-out, transactional rollback, idempotent retry, all three notifications, `lock: :pessimistic`, multi-counter coalescing, and Result interop. End-to-end coverage of the `:sql` mode lives in `spec/standard_ledger/sql_integration_spec.rb`, which exercises registration validation (missing `recompute`, `via:` rejection, `:target_id` placeholder enforcement), after-create execution, transactional rollback when a sibling callback raises, the `if:`-guard skip, the nil-FK skip, the `applied`/`failed` notifications, idempotent install across multiple `:sql` declarations, and `rebuild!` for both single-target and walk-the-log scoping. End-to-end coverage of the rebuild path lives in `spec/standard_ledger/rebuild_integration_spec.rb`, which replays a 50-entry log via a class-form projector to restore truncated counters, asserts the `target:` / `target_class:` / no-arg scoping rules, and verifies the `<prefix>.projection.rebuilt` notification, `NotRebuildable` for block-form projections, and `Error` for unsupported modes. The base of unit specs (`Config`, `Result`, `Entry`, `Projector`) covers the lower-level surfaces in isolation.
+Specs are colocated by topic (`spec/standard_ledger/<topic>_spec.rb`). End-to-end coverage of the inline runtime lives in `spec/standard_ledger/inline_integration_spec.rb`, which exercises `StandardLedger.post` against the `spec/dummy/` SQLite harness — multi-target fan-out, transactional rollback, idempotent retry, all three notifications, `lock: :pessimistic`, multi-counter coalescing, and Result interop. End-to-end coverage of the `:sql` mode lives in `spec/standard_ledger/sql_integration_spec.rb`, which exercises registration validation (missing `recompute`, `via:`/`lock:`/`permissive:` rejection, `:target_id` placeholder enforcement), after-create execution, transactional rollback when a sibling callback raises, the `if:`-guard skip, the nil-FK skip, the `applied`/`failed` notifications, idempotent install, and `rebuild!` for both single-target and walk-the-log scoping. End-to-end coverage of the matview runtime lives in `spec/standard_ledger/matview_integration_spec.rb`, which mocks `connection.execute` (SQLite has no `REFRESH MATERIALIZED VIEW`) to capture the SQL the gem would issue in Postgres and asserts the DSL surface, the `refresh!` API + identifier validation, the `MatviewRefreshJob` delegation contract, and `rebuild!` for matview projections. End-to-end coverage of the rebuild path lives in `spec/standard_ledger/rebuild_integration_spec.rb`, which replays a 50-entry log via a class-form projector to restore truncated counters, asserts the `target:` / `target_class:` / no-arg scoping rules, and verifies the `<prefix>.projection.rebuilt` notification, `NotRebuildable` for block-form projections, and `Error` for unsupported modes. The base of unit specs (`Config`, `Result`, `Entry`, `Projector`) covers the lower-level surfaces in isolation.
 
 ### Host-app helpers (`require "standard_ledger/rspec"`)
 
@@ -137,8 +142,7 @@ Host apps opt into the gem's RSpec support by adding `require "standard_ledger/r
 Future spec coverage (lands with the corresponding PRs):
 
 - `:async` mode transactional semantics (jobs enqueue at `after_create_commit`, with `with_lock` inside the job)
-- `:trigger`/`:matview` modes
-- `:trigger` mode `doctor` rake task; `:matview` mode `CONCURRENTLY` refresh
+- `:trigger` mode + its `doctor` rake task
 
 ## Conventions
 

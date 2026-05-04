@@ -12,6 +12,8 @@ require "standard_ledger/projection"
 require "standard_ledger/projector"
 require "standard_ledger/modes/inline"
 require "standard_ledger/modes/sql"
+require "standard_ledger/modes/matview"
+require "standard_ledger/jobs/matview_refresh_job"
 require "standard_ledger/engine" if defined?(::Rails::Engine)
 
 # StandardLedger captures the recurring "immutable journal entry → N
@@ -258,6 +260,18 @@ module StandardLedger
 
       definitions.each do |definition|
         validate_rebuildable_mode!(entry_class, definition)
+
+        if definition.mode == :matview
+          rebuild_matview_definition(definition)
+          rebuilt << {
+            target_class: nil,
+            target_id:    nil,
+            projection:   definition.target_association,
+            view:         definition.view
+          }
+          next
+        end
+
         validate_rebuildable_projector!(entry_class, definition)
 
         each_rebuild_target(entry_class, definition, target: target, batch_size: batch_size) do |t|
@@ -280,6 +294,41 @@ module StandardLedger
       # NOT unwound (the contract is per-target transactional, not
       # cross-target atomic) — we surface the failure but return.
       build_result(success: false, errors: [ e.message ], projections: { rebuilt: rebuilt })
+    end
+
+    # Refresh a host-owned materialized view. Issues
+    # `REFRESH MATERIALIZED VIEW [CONCURRENTLY] <view_name>` against the
+    # active connection and emits the standard `<prefix>.projection.refreshed`
+    # notification on success (or `<prefix>.projection.failed` on raise,
+    # before re-raising — the host's scheduler / job runner needs to see the
+    # failure to drive its retry path).
+    #
+    # Two callers reach for this:
+    #
+    # - **Hosts**, after a critical write that needs read-your-write semantics
+    #   on a `:matview` projection (e.g. luminality's `PromptPacks::DrawOperation`
+    #   refreshes `user_prompt_inventories` at the end of the operation so the
+    #   user sees their post-draw count immediately, instead of waiting for
+    #   the next scheduled refresh).
+    # - **`StandardLedger::MatviewRefreshJob`**, the ActiveJob class hosts
+    #   point their scheduler at; that job is a thin wrapper around this
+    #   method.
+    #
+    # @param view_name [String, Symbol] the materialized view to refresh.
+    # @param concurrently [Boolean, nil] `nil` (default — read
+    #   `Config#matview_refresh_strategy`), `true` (force CONCURRENTLY), or
+    #   `false` (force a blocking refresh).
+    # @return [StandardLedger::Result, Object] success result on completion;
+    #   the host's Result type when `Config#custom_result?` is true. On SQL
+    #   failure the underlying exception propagates after the
+    #   `<prefix>.projection.failed` event fires.
+    def refresh!(view_name, concurrently: nil)
+      effective = effective_concurrent_flag(concurrently)
+      Modes::Matview.new.refresh!(view_name, concurrently: effective)
+      build_result(
+        success: true,
+        projections: { refreshed: [ { view: view_name.to_s, concurrently: effective } ] }
+      )
     end
 
     private
@@ -366,15 +415,38 @@ module StandardLedger
     end
 
     # Refuse to rebuild for modes that don't yet implement the
-    # log-replay path. The remaining modes land with their own mode PRs.
+    # log-replay path. `:inline`, `:sql`, and `:matview` are the supported
+    # modes today; `:async` and `:trigger` land with their own mode PRs.
     def validate_rebuildable_mode!(entry_class, definition)
       return if definition.mode == :inline
       return if definition.mode == :sql
+      return if definition.mode == :matview
 
       raise StandardLedger::Error,
             "rebuild! does not yet support mode: #{definition.mode.inspect} " \
             "on #{entry_class.name}##{definition.target_association}; " \
             "this mode's rebuild path lands in its own PR"
+    end
+
+    # Rebuild a `:matview` projection by issuing a single REFRESH against
+    # the registered view. There's no per-target loop — the matview holds
+    # state for every target in a single relation, so one refresh is the
+    # entire rebuild.
+    def rebuild_matview_definition(definition)
+      concurrently = definition.refresh_options.is_a?(Hash) ? definition.refresh_options[:concurrently] : nil
+      effective = effective_concurrent_flag(concurrently)
+      Modes::Matview.new.refresh!(definition.view, concurrently: effective)
+    end
+
+    # Reduce the public `concurrently:` parameter to a Boolean by reading
+    # `Config#matview_refresh_strategy` only when the caller passed `nil`.
+    # `true`/`false` are honored verbatim so callers can override the
+    # default per-call (e.g. an ad-hoc blocking refresh on a view whose
+    # default is concurrent).
+    def effective_concurrent_flag(concurrently)
+      return concurrently unless concurrently.nil?
+
+      config.matview_refresh_strategy == :concurrent
     end
 
     # Block-form `:inline` projections register per-kind handlers
