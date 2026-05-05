@@ -6,6 +6,10 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0] - 2026-05-05
+
 ### Added
 - `StandardLedger::EventEmitter` — internal dispatcher that routes
   gem events through `Rails.event.notify` on Rails 8.1+ and falls back
@@ -213,7 +217,7 @@ project adheres to [Semantic Versioning](https://semver.org/).
   block-form / no-`rebuild` / unsupported-mode raises, the
   `projection.rebuilt` notification, and host Result interop.
 
-## [0.1.0] — 2026-05-04
+## [0.1.0] - 2026-05-04
 
 Initial scaffold. Establishes the gem layout, public API surface stubs, and the
 build/test pipeline. **Not yet usable in production** — see the design doc
@@ -251,5 +255,6 @@ roadmap.
   and `:trigger` (host-owned, gem records rebuild SQL).
 - `standard_ledger:doctor` rake task (verifies trigger presence, etc.).
 
-[Unreleased]: https://github.com/rarebit-one/standard_ledger/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/rarebit-one/standard_ledger/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/rarebit-one/standard_ledger/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rarebit-one/standard_ledger/releases/tag/v0.1.0

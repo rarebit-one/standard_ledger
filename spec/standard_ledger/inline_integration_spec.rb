@@ -1,4 +1,4 @@
-# rubocop:disable RSpec/DescribeClass, RSpec/ExampleLength
+# rubocop:disable RSpec/DescribeClass, RSpec/ExampleLength, RSpec/MultipleExpectations
 RSpec.describe "StandardLedger inline mode (end-to-end)" do
   before do
     stub_const("VoucherScheme", Class.new(ActiveRecord::Base) do
@@ -95,7 +95,7 @@ RSpec.describe "StandardLedger inline mode (end-to-end)" do
       applied = []
       sub = ActiveSupport::Notifications.subscribe("standard_ledger.projection.applied") do |*args|
         event = ActiveSupport::Notifications::Event.new(*args)
-        applied << event.payload[:projection].target_association
+        applied << event.payload[:projection]
       end
 
       first = StandardLedger.post(
@@ -219,7 +219,7 @@ RSpec.describe "StandardLedger inline mode (end-to-end)" do
         attrs:   { organisation_id: "org-1", serial_no: "v-apl" }
       )
 
-      assocs = applied_events.map { |p| p[:projection].target_association }
+      assocs = applied_events.map { |p| p[:projection] }
       expect(assocs).to contain_exactly(:voucher_scheme, :customer_profile)
       expect(applied_events).to all(include(mode: :inline))
       expect(applied_events.first[:duration_ms]).to be_a(Float)
@@ -252,6 +252,8 @@ RSpec.describe "StandardLedger inline mode (end-to-end)" do
 
       expect(failed_events.size).to eq(1)
       expect(failed_events.first[:error]).to be_a(RuntimeError)
+      expect(failed_events.first[:duration_ms]).to be_a(Float)
+      expect(failed_events.first[:projection]).to eq(:voucher_scheme)
       expect(FailingRecord.count).to eq(0)
     end
   end
@@ -435,4 +437,4 @@ RSpec.describe "StandardLedger inline mode (end-to-end)" do
     end
   end
 end
-# rubocop:enable RSpec/DescribeClass, RSpec/ExampleLength
+# rubocop:enable RSpec/DescribeClass, RSpec/ExampleLength, RSpec/MultipleExpectations

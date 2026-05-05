@@ -2,11 +2,11 @@
 
 Immutable journal entries with declarative aggregate projections for Rails apps.
 
-> **Status: scaffolding (v0.1.0).** The gem layout, public API surface, and
-> build pipeline are in place; the runtime behavior (mode implementations,
-> idempotency rescue, rebuild path) lands in subsequent PRs. See
-> [`standard_ledger-design.md`](https://github.com/rarebit-one/standard_ledger/blob/main/standard_ledger-design.md)
-> in the workspace for the full design.
+> **Status: v0.2.0** — production-ready for `:inline`, `:sql`, and `:matview`
+> projections (covering luminality-web, fundbright-web, and sidekick-web's
+> needs). `:async` and `:trigger` modes ship in subsequent PRs ahead of
+> nutripod-web adoption. See [`standard_ledger-design.md`](https://github.com/rarebit-one/standard_ledger/blob/main/standard_ledger-design.md)
+> for the full design and rollout plan.
 
 ## What it is
 

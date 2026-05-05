@@ -43,5 +43,8 @@ module StandardLedger
     def rails_event_available?
       !rails_event_bus.nil?
     end
+
+    # Hides the singleton copy that `module_function` generated above.
+    private_class_method :rails_event_bus
   end
 end

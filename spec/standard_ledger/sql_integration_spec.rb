@@ -285,7 +285,7 @@ RSpec.describe "StandardLedger sql mode (end-to-end)" do
       payload = applied_events.first
       expect(payload[:mode]).to eq(:sql)
       expect(payload[:target]).to be_nil
-      expect(payload[:projection].target_association).to eq(:voucher_scheme)
+      expect(payload[:projection]).to eq(:voucher_scheme)
       expect(payload[:duration_ms]).to be_a(Float)
     end
 

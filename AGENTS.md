@@ -2,7 +2,7 @@
 
 StandardLedger is a Ruby gem that captures the recurring "immutable journal entry → N aggregate projections" pattern as a declarative DSL on host ActiveRecord models. The design is documented in [`standard_ledger-design.md`](./standard_ledger-design.md); read it before making non-trivial changes.
 
-> **Status: scaffolding (v0.1.0).** The gem layout, public API surfaces, and build pipeline are in place; the runtime behavior (mode implementations, idempotency rescue, rebuild path, instrumentation) is enumerated in `CHANGELOG.md` under "Pending" and lands in subsequent PRs.
+> **Status: v0.2.0** — production-ready for `:inline`, `:sql`, and `:matview` projections (covering luminality-web, fundbright-web, and sidekick-web's needs). `:async` and `:trigger` modes ship in subsequent PRs ahead of nutripod-web adoption. See `standard_ledger-design.md` for the full design and rollout plan.
 
 ## Quick Reference
 

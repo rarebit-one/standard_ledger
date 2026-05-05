@@ -173,8 +173,10 @@ module StandardLedger
         if via && permissive
           raise ArgumentError,
                 "projects_onto :#{target_association} got `permissive: true` with `via:`; " \
-                "`permissive:` is only meaningful with the block form, since the class form has " \
-                "no per-kind handlers and runs unconditionally"
+                "`permissive:` is only meaningful with the block form, where it falls back " \
+                "to the `:_` wildcard handler when no specific-kind handler matches. Class " \
+                "form (`via: ProjectorClass`) runs `apply(target, entry)` unconditionally, " \
+                "so there's nothing to be permissive about."
         end
 
         handlers = {}
