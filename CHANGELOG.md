@@ -7,6 +7,50 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `:async` projection mode + `StandardLedger::ProjectionJob`. Used when
+  the projection is too expensive or stateful for the entry's transaction
+  (jsonb rebuild, multi-row aggregate) — the canonical example is
+  nutripod's `Order#payable_balance` / `Order#fulfillable_balance` jsonb
+  columns. The strategy installs an `after_create_commit` callback that
+  enqueues `StandardLedger::ProjectionJob` per (entry, projection) pair;
+  the job resolves the target via the entry's `belongs_to`, wraps
+  `target.with_lock { projector.apply(target, entry) }`, and fires the
+  same `<prefix>.projection.applied` / `<prefix>.projection.failed`
+  events as `:inline` (with an additional `attempt:` key drawn from
+  ActiveJob's `executions` accessor).
+  - Class-form only: `:async` projections must declare `via: ProjectorClass`.
+    The projector's `apply(target, entry)` should recompute from the log
+    inside `with_lock` rather than apply a delta — async retries can run
+    the projector more than once, so block-form per-kind handlers
+    (incrementing counters) are silently corrupting under retry. The
+    registration path rejects block forms with a clear ArgumentError;
+    `lock:` and `permissive: true` are also rejected (`with_lock` is
+    unconditional and there are no per-kind handlers).
+  - Retries: `Config#default_async_retries` (default 3 total attempts —
+    one initial run + two retries, matching ActiveJob's `retry_on
+    attempts:` semantics) caps the attempt count. The job uses a
+    hand-rolled `rescue_from(StandardError)` that reads the cap at
+    perform time so reconfiguration in tests / hosts takes effect
+    immediately, with `discard_on StandardLedger::Error` so programmer
+    errors (missing definition, renamed association) skip the retry
+    budget entirely. Each failure emits its own
+    `<prefix>.projection.failed` event with the current `attempt` so
+    subscribers see the full retry history.
+  - `Config#default_async_job` — hosts can swap the default
+    `StandardLedger::ProjectionJob` for their own subclass (per-mode
+    queue routing, custom retry policies). The strategy reads it at
+    enqueue time.
+  - `with_modes(EntryClass => :inline)` interop: when the override map
+    forces an entry class to `:inline`, the strategy short-circuits the
+    enqueue and runs `target.with_lock { projector.apply(target, entry) }`
+    synchronously inside the block. Useful in unit specs that want
+    end-to-end coverage without standing up a job runner. Notifications
+    fire with `mode: :async, attempt: 1` so subscribers can't tell the
+    difference.
+  - `StandardLedger.rebuild!` extends to `:async` projections — same
+    per-target rebuild semantics as `:inline` (delegates to
+    `definition.projector_class.new.rebuild(target)`). The mode
+    difference is only in the after-create path, not the rebuild path.
 - `:trigger` projection mode. The host owns the database trigger
   (created in a Rails migration); the gem **does not create or manage
   triggers** — that's deliberate, because giving a Ruby DSL the power
@@ -69,6 +113,13 @@ project adheres to [Semantic Versioning](https://semver.org/).
   task's three behaviours (success, failure with exit 1 + stderr
   message, ignoring entry classes without `:trigger` projections)
   without requiring a real Postgres database.
+- Integration spec for `:async` mode
+  (`spec/standard_ledger/async_integration_spec.rb`) covers DSL
+  registration validation, after-commit enqueue, multi-target fan-out,
+  nil-FK skip (both at enqueue and at perform), the `with_modes`
+  inline override, the `default_async_job` swap, retry-on-failure with
+  attempt-counter telemetry, the `discard_on StandardLedger::Error`
+  programmer-error path, and the rebuild path.
 
 ## [0.2.0] - 2026-05-05
 

@@ -11,8 +11,9 @@ module StandardLedger
     # `c.default_async_job = Orders::FulfillableProjectionJob`.
     attr_accessor :default_async_job
 
-    # Number of times an `:async` projection will retry before dead-lettering.
-    # Default: 3.
+    # Total attempts (including the first) for an `:async` projection before
+    # the failure is propagated. Default: 3 (one initial run + two retries).
+    # Matches ActiveJob's `retry_on attempts:` semantics.
     attr_accessor :default_async_retries
 
     # Scheduler backend for `:matview` refresh jobs. One of

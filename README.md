@@ -102,6 +102,50 @@ mid-loop are not unwound. Block-form (delta) projections raise
 `NotRebuildable` because they cannot be reconstructed from the log
 without a host-supplied recompute path.
 
+For projections too expensive or stateful to run inside the entry's
+transaction (jsonb rebuild, multi-row aggregate), use `mode: :async` —
+the strategy enqueues `StandardLedger::ProjectionJob` from
+`after_create_commit`, and the job runs `target.with_lock { projector.apply(target, entry) }`
+on the configured ActiveJob backend:
+
+```ruby
+class Orders::FulfillableProjector < StandardLedger::Projection
+  # Recompute the jsonb balance from the full log inside with_lock.
+  # `:async` projectors must be retry-safe — async retries can run
+  # `apply` more than once, so block-form per-kind handlers
+  # (incrementing counters) are rejected at registration time.
+  def apply(order, _entry)
+    order.update!(
+      fulfillable_balance: order.fulfillment_records.group(:key).sum(:amount)
+    )
+  end
+
+  def rebuild(order)
+    apply(order, nil)
+  end
+end
+
+class FulfillmentRecord < ApplicationRecord
+  include StandardLedger::Entry
+  include StandardLedger::Projector
+
+  belongs_to :order
+
+  ledger_entry kind: :action, idempotency_key: :external_ref, scope: :organisation_id
+
+  projects_onto :order, mode: :async, via: Orders::FulfillableProjector
+end
+```
+
+Retries are capped by `Config#default_async_retries` (default 3); the
+job emits `<prefix>.projection.applied` and `<prefix>.projection.failed`
+events with an additional `attempt:` key so subscribers can tell
+first-try success from retry success. Tests can force async projections
+to run inline via `StandardLedger.with_modes(FulfillmentRecord => :inline) { ... }`
+— the strategy short-circuits the enqueue and runs the projector
+synchronously inside `with_lock`, so end-to-end coverage works without a
+job runner.
+
 For projections expressible as a single `UPDATE` over an aggregate of the
 log, use `mode: :sql` — no Ruby-side handlers, no AR object loads, just
 a recompute statement that runs in the entry's `after_create`:
