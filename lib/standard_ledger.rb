@@ -207,8 +207,11 @@ module StandardLedger
     #   the log references. The gem does NOT verify or recreate the
     #   trigger here — `standard_ledger:doctor` is the deploy-time
     #   check for trigger presence.
-    # - `:async` mode is not yet supported by `rebuild!`; it raises
-    #   `StandardLedger::Error`. It lands with its own PR.
+    # - `:async` projections rebuild via the same per-target semantics as
+    #   `:inline` (delegates to `definition.projector_class.new.rebuild(target)`).
+    #   The mode difference is only in the after-create path (in-transaction
+    #   vs. post-commit job), not in the rebuild path, which always runs
+    #   synchronously.
     #
     # Atomicity: each (target, projection) pair runs in its own
     # transaction. A failure mid-loop is **not** rolled back — earlier
