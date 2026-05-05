@@ -2,11 +2,12 @@
 
 Immutable journal entries with declarative aggregate projections for Rails apps.
 
-> **Status: v0.2.0** — production-ready for `:inline`, `:sql`, `:matview`,
-> and `:trigger` projections (covering luminality-web, fundbright-web,
-> sidekick-web, and nutripod-web's inventory). `:async` mode ships in a
-> subsequent PR ahead of nutripod-web's payments / fulfillment adoption.
-> See [`standard_ledger-design.md`](https://github.com/rarebit-one/standard_ledger/blob/main/standard_ledger-design.md)
+> **Status: v0.3.0** — feature-complete across all five projection modes
+> (`:inline`, `:async`, `:sql`, `:matview`, `:trigger`) plus
+> `StandardLedger.rebuild!` log-replay, `StandardLedger.refresh!` ad-hoc
+> matview refresh, and the `standard_ledger:doctor` rake task. Ready for
+> adoption in luminality-web, fundbright-web, sidekick-web, and
+> nutripod-web. See [`standard_ledger-design.md`](https://github.com/rarebit-one/standard_ledger/blob/main/standard_ledger-design.md)
 > for the full design and rollout plan.
 
 ## What it is

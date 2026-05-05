@@ -6,6 +6,10 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.0] - 2026-05-05
+
 ### Added
 - `:async` projection mode + `StandardLedger::ProjectionJob`. Used when
   the projection is too expensive or stateful for the entry's transaction
@@ -368,6 +372,7 @@ roadmap.
   and `:trigger` (host-owned, gem records rebuild SQL).
 - `standard_ledger:doctor` rake task (verifies trigger presence, etc.).
 
-[Unreleased]: https://github.com/rarebit-one/standard_ledger/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/rarebit-one/standard_ledger/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/rarebit-one/standard_ledger/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rarebit-one/standard_ledger/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rarebit-one/standard_ledger/releases/tag/v0.1.0
