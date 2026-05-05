@@ -246,13 +246,13 @@ RSpec.describe "StandardLedger.rebuild! (end-to-end)" do
     end
 
     it "raises Error for modes the rebuild path doesn't yet support" do
-      # A projection registered with `mode: :async` is enough to
-      # exercise the validation path even though :async itself isn't
+      # A projection registered with `mode: :trigger` is enough to
+      # exercise the validation path even though :trigger itself isn't
       # wired up yet — `rebuild!` must refuse before invoking any
       # mode-specific machinery.
       definition = StandardLedger::Projector::Definition.new(
         target_association: :voucher_scheme,
-        mode:               :async,
+        mode:               :trigger,
         projector_class:    SchemeProjector,
         handlers:           {},
         guard:              nil,
@@ -261,7 +261,7 @@ RSpec.describe "StandardLedger.rebuild! (end-to-end)" do
         options:            {}
       )
 
-      stub_const("AsyncProjectedRecord", Class.new(ActiveRecord::Base) do
+      stub_const("TriggerProjectedRecord", Class.new(ActiveRecord::Base) do
         self.table_name = "voucher_records"
         include StandardLedger::Entry
         include StandardLedger::Projector
@@ -271,10 +271,10 @@ RSpec.describe "StandardLedger.rebuild! (end-to-end)" do
         ledger_entry kind: :action, idempotency_key: :serial_no, scope: :organisation_id
       end)
 
-      AsyncProjectedRecord.standard_ledger_projections = [ definition ]
+      TriggerProjectedRecord.standard_ledger_projections = [ definition ]
 
       expect {
-        StandardLedger.rebuild!(AsyncProjectedRecord, target: scheme)
+        StandardLedger.rebuild!(TriggerProjectedRecord, target: scheme)
       }.to raise_error(StandardLedger::Error, /does not yet support mode/)
     end
 

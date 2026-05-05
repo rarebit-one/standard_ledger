@@ -40,13 +40,15 @@ standard_ledger/
 │   ├── projection.rb     # Base class for class-form projectors
 │   ├── modes/
 │   │   ├── inline.rb     # `:inline` mode runtime — installs `after_create`, applies projections, coalesces multi-counter writes
+│   │   ├── async.rb      # `:async` mode runtime — installs `after_create_commit`, enqueues ProjectionJob per (entry, target), honors `with_modes(:inline)` override
 │   │   ├── sql.rb        # `:sql` mode runtime — installs `after_create`, runs the recompute SQL with `:target_id` bound from the entry's FK
 │   │   ├── matview.rb    # `:matview` mode runtime — issues `REFRESH MATERIALIZED VIEW [CONCURRENTLY]`, no per-entry callback
 │   │   └── trigger.rb    # `:trigger` mode runtime — no-op marker; the host owns the DB trigger, the gem records `trigger_name` + `rebuild_sql` for `rebuild!` and `doctor`
-│   └── jobs/
-│       └── matview_refresh_job.rb # ActiveJob wrapper around `StandardLedger.refresh!` for hosts to schedule
-├── lib/tasks/
-│   └── standard_ledger.rake       # `standard_ledger:doctor` — verifies every `:trigger` projection's named trigger exists in `pg_trigger` (Postgres-only)
+│   ├── jobs/
+│   │   ├── matview_refresh_job.rb # ActiveJob wrapper around `StandardLedger.refresh!` for hosts to schedule
+│   │   └── projection_job.rb      # ActiveJob class run by `:async` mode; resolves target, wraps `target.with_lock { projector.apply(target, entry) }`, retries up to `Config#default_async_retries`
+│   └── tasks/
+│       └── standard_ledger.rake   # `standard_ledger:doctor` — verifies every `:trigger` projection's named trigger exists in `pg_trigger` (Postgres-only)
 ├── lib/generators/standard_ledger/install/
 │   ├── install_generator.rb       # `rails g standard_ledger:install`
 │   └── templates/initializer.rb.tt # Generated initializer with commented-out Config DSL

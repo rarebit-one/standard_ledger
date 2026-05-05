@@ -73,6 +73,55 @@ module StandardLedger
       def projects_onto(target_association, mode:, via: nil, if: nil, lock: nil, permissive: false, view: nil, refresh: nil, trigger_name: nil, **options, &block)
         guard = binding.local_variable_get(:if) # `if:` is a reserved keyword
 
+        if mode == :async
+          if block
+            raise ArgumentError,
+                  "projects_onto :#{target_association} mode: :async does not accept a block — " \
+                  "use `via: ProjectorClass` whose `apply(target, entry)` recomputes from the log " \
+                  "inside `with_lock` for retry-safety. Block-form per-kind handlers aren't safe " \
+                  "under async retry."
+          end
+
+          if via.nil?
+            raise ArgumentError,
+                  "projects_onto :#{target_association} mode: :async requires `via: ProjectorClass` " \
+                  "(class-form only — see the registration error message for block-form for the why)"
+          end
+
+          unless lock.nil?
+            raise ArgumentError,
+                  "projects_onto :#{target_association} got `lock:` with mode: :async; " \
+                  ":async always wraps the projector in `target.with_lock` for retry-safety, " \
+                  "so the option is redundant. Drop it."
+          end
+
+          if permissive
+            raise ArgumentError,
+                  "projects_onto :#{target_association} got `permissive: true` with mode: :async; " \
+                  "`permissive:` is only meaningful with the block form, and `:async` mode rejects " \
+                  "block-form for retry-safety reasons"
+          end
+
+          definition = Definition.new(
+            target_association: target_association,
+            mode: mode,
+            projector_class: via,
+            handlers: {},
+            guard: guard,
+            lock: lock,
+            permissive: permissive,
+            recompute_sql: nil,
+            trigger_name: nil,
+            view: nil,
+            refresh_options: nil,
+            options: options
+          )
+
+          self.standard_ledger_projections = standard_ledger_projections + [ definition ]
+          install_mode_callbacks_for(definition)
+          return definition
+        end
+
         if mode == :trigger
           if via
             raise ArgumentError,
@@ -306,6 +355,8 @@ module StandardLedger
         case definition.mode
         when :inline
           StandardLedger::Modes::Inline.install!(self)
+        when :async
+          StandardLedger::Modes::Async.install!(self)
         when :sql
           StandardLedger::Modes::Sql.install!(self)
         when :matview

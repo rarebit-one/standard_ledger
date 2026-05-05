@@ -15,7 +15,9 @@ require "standard_ledger/modes/inline"
 require "standard_ledger/modes/sql"
 require "standard_ledger/modes/matview"
 require "standard_ledger/modes/trigger"
+require "standard_ledger/modes/async"
 require "standard_ledger/jobs/matview_refresh_job"
+require "standard_ledger/jobs/projection_job"
 require "standard_ledger/engine" if defined?(::Rails::Engine)
 
 # StandardLedger captures the recurring "immutable journal entry → N
@@ -427,11 +429,17 @@ module StandardLedger
       reflection.klass
     end
 
-    # Refuse to rebuild for modes that don't yet implement the
-    # log-replay path. `:inline`, `:sql`, `:matview`, and `:trigger` are
-    # the supported modes today; `:async` lands with its own mode PR.
+    # All five projection modes (`:inline`, `:async`, `:sql`, `:matview`,
+    # `:trigger`) implement a log-replay path through this method.
+    #
+    # `:async` and `:inline` share the same per-target rebuild semantics —
+    # both delegate to `definition.projector_class.new.rebuild(target)`.
+    # The difference between the two modes is only in the after-create
+    # path (in-transaction vs. post-commit job), not in the rebuild path,
+    # which always runs synchronously.
     def validate_rebuildable_mode!(entry_class, definition)
       return if definition.mode == :inline
+      return if definition.mode == :async
       return if definition.mode == :sql
       return if definition.mode == :matview
       return if definition.mode == :trigger
