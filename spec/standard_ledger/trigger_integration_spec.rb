@@ -187,6 +187,22 @@ RSpec.describe "StandardLedger trigger mode (end-to-end)" do
       }.to raise_error(ArgumentError, /`permissive:` with mode: :trigger/)
     end
 
+    it "raises ArgumentError when given if: (silently never evaluated by the trigger)" do
+      expect {
+        Class.new(ActiveRecord::Base) do
+          self.table_name = "voucher_records"
+          include StandardLedger::Entry
+          include StandardLedger::Projector
+          belongs_to :voucher_scheme, optional: true
+          ledger_entry kind: :action, idempotency_key: :serial_no, scope: :organisation_id
+
+          projects_onto :voucher_scheme, mode: :trigger, trigger_name: "x", if: -> { false } do
+            rebuild_sql "UPDATE voucher_schemes SET granted_vouchers_count = 0 WHERE id = :target_id"
+          end
+        end
+      }.to raise_error(ArgumentError, /`if:` with mode: :trigger/)
+    end
+
     it "raises ArgumentError when rebuild_sql is called more than once in the same block" do
       expect {
         Class.new(ActiveRecord::Base) do
@@ -249,6 +265,22 @@ RSpec.describe "StandardLedger trigger mode (end-to-end)" do
 
       expect(scheme.reload.granted_vouchers_count).to eq(0)
     end
+
+    it "apply_projection! raises a clear StandardLedger::Error for :trigger definitions" do
+      # Mirrors the existing `:sql` guard: calling the per-entry Ruby
+      # dispatcher on a `:trigger` definition is a category error — the
+      # trigger fires from the database, not from Ruby. Without this
+      # guard, `apply_projection!` fell through to `resolve_kind!` and
+      # raised an `UnhandledKind`-style error blaming a missing handler,
+      # which is misleading.
+      define_trigger_record(rebuild_scheme_counters_sql)
+
+      entry = VoucherRecord.new(action: "grant", serial_no: "v-x", organisation_id: "org-1", voucher_scheme: scheme)
+      definition = VoucherRecord.standard_ledger_projections.first
+
+      expect { entry.apply_projection!(definition) }
+        .to raise_error(StandardLedger::Error, /not supported for mode: :trigger/)
+    end
   end
 
   describe "StandardLedger.rebuild!" do
@@ -296,6 +328,23 @@ RSpec.describe "StandardLedger trigger mode (end-to-end)" do
       expect(scheme_b.reload.granted_vouchers_count).to eq(1)
       target_ids = result.projections[:rebuilt].map { |p| p[:target_id] }
       expect(target_ids).to contain_exactly(scheme.id, scheme_b.id)
+    end
+
+    it "rebuilds every target of a given class when target_class: is supplied" do
+      # `target_class:` shares the SQL execution path with `target:` but
+      # selects projections by target_class rather than by a single
+      # instance. Pin coverage explicitly for `:trigger` so any future
+      # divergence from `:sql`'s code path here gets caught.
+      post_log(scheme: scheme,   prefix: "a")
+      post_log(scheme: scheme_b, prefix: "b")
+
+      result = StandardLedger.rebuild!(VoucherRecord, target_class: VoucherScheme)
+
+      expect(result).to be_success
+      expect(result.projections[:rebuilt].size).to eq(2)
+      expect(scheme.reload.granted_vouchers_count).to eq(1)
+      expect(scheme_b.reload.granted_vouchers_count).to eq(1)
+      expect(result.projections[:rebuilt].map { |p| p[:target_class] }).to all(eq(VoucherScheme))
     end
 
     it "fires <prefix>.projection.rebuilt with mode: :trigger" do

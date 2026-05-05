@@ -9,6 +9,14 @@ RSpec.describe "rake standard_ledger:doctor" do
   # mocked per example, since SQLite (the test harness's DB) has no
   # `pg_trigger` system catalog.
   let(:task) { Rake::Task["standard_ledger:doctor"] }
+  # The doctor uses each entry class's own `connection` (not
+  # `ActiveRecord::Base.connection`) so multi-DB hosts query the
+  # connection that owns the entry class's table. The shared SQLite
+  # test connection has no `pg_trigger` system catalog, so we stub a
+  # fake connection on every entry class the doctor walks. This
+  # spec's local entry classes all share AR's base connection, so a
+  # single fake serves them all.
+  let(:fake_connection) { instance_double(ActiveRecord::ConnectionAdapters::AbstractAdapter) }
 
   before do
     Rake.application = Rake::Application.new
@@ -35,12 +43,25 @@ RSpec.describe "rake standard_ledger:doctor" do
         rebuild_sql "UPDATE voucher_schemes SET granted_vouchers_count = 0 WHERE id = :target_id"
       end
     end)
+
+    # Stubbing `ActiveRecord::Base.connection` to return
+    # `fake_connection` is intentional — `DoctorRecord.connection`
+    # (and any sibling entry class's `.connection`) walks up to the
+    # base connection in this single-DB test setup, so the stub flows
+    # through wherever the doctor calls `klass.connection`.
+    allow(ActiveRecord::Base).to receive(:connection).and_return(fake_connection)
   end
 
   it "prints the success message and exits 0 when every trigger is present" do
     fake_result = instance_double(ActiveRecord::Result, rows: [ [ 1 ] ])
-    allow(ActiveRecord::Base.connection).to receive(:exec_query)
-      .with(/SELECT 1 FROM pg_trigger/, "standard_ledger:doctor", [ "voucher_records_apply_to_schemes" ])
+    # The query joins `pg_trigger` against `pg_class` and binds both
+    # the trigger name AND the entry class's table name, so the doctor
+    # only flags presence on the *correct* table (trigger names are
+    # per-table in Postgres — bare-name lookups admit false positives
+    # across unrelated tables).
+    allow(fake_connection).to receive(:exec_query)
+      .with(/SELECT 1 FROM pg_trigger.*JOIN pg_class.*c\.relname/m, "standard_ledger:doctor",
+            [ "voucher_records_apply_to_schemes", "voucher_records" ])
       .and_return(fake_result)
 
     expect { task.invoke }.to output(/All :trigger projections have their triggers present/).to_stdout
@@ -48,8 +69,9 @@ RSpec.describe "rake standard_ledger:doctor" do
 
   it "exits 1 and reports the missing trigger when pg_trigger has no row" do
     fake_result = instance_double(ActiveRecord::Result, rows: [])
-    allow(ActiveRecord::Base.connection).to receive(:exec_query)
-      .with(/SELECT 1 FROM pg_trigger/, "standard_ledger:doctor", [ "voucher_records_apply_to_schemes" ])
+    allow(fake_connection).to receive(:exec_query)
+      .with(/SELECT 1 FROM pg_trigger.*JOIN pg_class.*c\.relname/m, "standard_ledger:doctor",
+            [ "voucher_records_apply_to_schemes", "voucher_records" ])
       .and_return(fake_result)
 
     expect { task.invoke }.to raise_error(SystemExit) { |error|
@@ -73,19 +95,22 @@ RSpec.describe "rake standard_ledger:doctor" do
       end
     end)
 
-    queried_names = []
-    allow(ActiveRecord::Base.connection).to receive(:exec_query) do |_sql, _name, binds|
-      queried_names << binds.first
+    queried_binds = []
+    allow(fake_connection).to receive(:exec_query) do |_sql, _name, binds|
+      queried_binds << binds
       instance_double(ActiveRecord::Result, rows: [ [ 1 ] ])
     end
 
     expect { task.invoke }.to output(/All :trigger projections have their triggers present/).to_stdout
-    # InlineOnlyRecord declares no `:trigger` projection — its trigger
-    # name (there is none) must never appear in the queried list. Other
-    # `:trigger` projections from sibling specs may or may not appear
-    # depending on AR's `descendants` retention; we only assert that
-    # the inline class does NOT show up here.
-    expect(queried_names).not_to include(nil, "")
+
+    # The doctor only iterates `:trigger` projections, so an inline-only
+    # class must not generate any pg_trigger query. Every observed bind
+    # tuple must be the DoctorRecord trigger — never a nil/empty
+    # placeholder, never a tuple inviting the inline class. (DoctorRecord
+    # and InlineOnlyRecord coincidentally share a `table_name`, so the
+    # table-name bind alone can't distinguish them; the assertion is
+    # that *only* DoctorRecord's trigger-name bind appears.)
+    expect(queried_binds).to all(eq([ "voucher_records_apply_to_schemes", "voucher_records" ]))
   end
 end
 # rubocop:enable RSpec/DescribeClass, RSpec/ExampleLength, RSpec/MultipleExpectations

@@ -25,14 +25,21 @@ namespace :standard_ledger do
     missing = []
     entry_classes.each do |klass|
       klass.standard_ledger_projections_for(:trigger).each do |definition|
-        # `pg_trigger.tgname` is the trigger's name as known to Postgres.
-        # The `LIMIT 1` guards against pathological cases where a
-        # trigger of the same name exists on multiple tables — for the
-        # doctor's purpose ("does it exist anywhere?") that's fine.
-        result = ActiveRecord::Base.connection.exec_query(
-          "SELECT 1 FROM pg_trigger WHERE tgname = $1 LIMIT 1",
+        # `pg_trigger.tgname` is the trigger's name as known to Postgres,
+        # but trigger names are scoped per-table — two tables can each
+        # have a trigger called e.g. `update_counts`. Join `pg_trigger`
+        # to `pg_class` and filter by the entry class's table name so the
+        # doctor reports presence on the *correct* table, not "anywhere
+        # in the schema". Use `klass.connection` (rather than
+        # `ActiveRecord::Base.connection`) so multi-DB setups query the
+        # connection that owns the entry class's table.
+        result = klass.connection.exec_query(
+          "SELECT 1 FROM pg_trigger t " \
+          "JOIN pg_class c ON c.oid = t.tgrelid " \
+          "WHERE t.tgname = $1 AND c.relname = $2 " \
+          "LIMIT 1",
           "standard_ledger:doctor",
-          [ definition.trigger_name ]
+          [ definition.trigger_name, klass.table_name ]
         )
         if result.rows.empty?
           missing << "  #{klass.name}##{definition.target_association}: trigger #{definition.trigger_name.inspect} not found"

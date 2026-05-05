@@ -96,6 +96,14 @@ module StandardLedger
                   "dispatch through per-kind handlers"
           end
 
+          if guard
+            raise ArgumentError,
+                  "projects_onto :#{target_association} got `if:` with mode: :trigger; " \
+                  "`if:` is not supported by :trigger mode — the database trigger fires " \
+                  "unconditionally from the DB on INSERT, so a Ruby-side guard would " \
+                  "silently never run"
+          end
+
           if trigger_name.nil? || trigger_name.to_s.empty?
             raise ArgumentError,
                   "projects_onto :#{target_association} requires `trigger_name: \"...\"` for mode: :trigger; " \
@@ -351,6 +359,12 @@ module StandardLedger
         raise Error,
               "apply_projection! is not supported for mode: :sql; " \
               "the recompute SQL runs through `Modes::Sql#call` directly with no per-kind dispatch"
+      end
+
+      if definition.mode == :trigger
+        raise Error,
+              "apply_projection! is not supported for mode: :trigger; " \
+              "the database trigger fires from the DB on INSERT, not from Ruby"
       end
 
       return false if definition.guard && !instance_exec(&definition.guard)
