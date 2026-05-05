@@ -6,7 +6,69 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+- `:trigger` projection mode. The host owns the database trigger
+  (created in a Rails migration); the gem **does not create or manage
+  triggers** — that's deliberate, because giving a Ruby DSL the power
+  to install/replace triggers is a deploy footgun (silent re-creation
+  on `db:schema:load` against a non-empty DB), and triggers are
+  versioned by `db/schema.rb` like any other DDL. The gem only records
+  the trigger's name and the equivalent rebuild SQL.
+  - `projects_onto :assoc, mode: :trigger, trigger_name: "..." do
+    rebuild_sql "..." end` declares a trigger projection. The
+    `trigger_name:` keyword is required (a non-empty string); the
+    block must call `rebuild_sql "..."` exactly once with a SQL
+    string containing the `:target_id` placeholder. Registration
+    rejects `via:`, `lock:`, and `permissive:` (none are meaningful
+    for `:trigger` mode — the trigger is the contract). `Definition`
+    gains a `trigger_name` field, populated only for `:trigger` mode;
+    the rebuild SQL is stored in the existing `recompute_sql` slot
+    (shared with `:sql` mode — both modes use it the same way).
+  - `StandardLedger::Modes::Trigger` strategy — `install!` is a no-op
+    marker (trigger projections fire from the database, not Ruby, so
+    no `after_create` callback is wired). The strategy class exists
+    only to keep `Projector#install_mode_callbacks_for`'s dispatch
+    table uniform across modes and to mark the entry class as having
+    at least one `:trigger` projection registered.
+  - `StandardLedger.rebuild!(EntryClass)` extends to `:trigger`
+    projections: the same SQL recompute path as `:sql` mode runs the
+    recorded `rebuild_sql` against each target the log references,
+    binding `:target_id` to each target's id. `target:` /
+    `target_class:` / no-arg scoping works the same way.
+    `<prefix>.projection.rebuilt` fires per target with `mode:
+    :trigger`. The gem does NOT verify or recreate the trigger
+    during `rebuild!` — `standard_ledger:doctor` is the deploy-time
+    check.
+- `standard_ledger:doctor` rake task. Iterates every registered
+  `:trigger` projection across all loaded entry classes (discovered
+  by walking `ActiveRecord::Base.descendants` for classes that
+  include `StandardLedger::Projector` and have at least one `:trigger`
+  projection). For each, queries `pg_trigger` to confirm the named
+  trigger exists in the connected schema. Reports missing triggers
+  on stderr with a clear remediation message and exits 1; prints a
+  success message and exits 0 otherwise. **Postgres-only** — the
+  task queries `pg_trigger` directly and will raise on a non-Postgres
+  connection. SQLite has no comparable per-statement trigger
+  introspection that fits this gem's contract; the only adopter
+  today is nutripod-web (Postgres). The task is auto-loaded via
+  `Engine.rake_tasks` so `bin/rails -T standard_ledger` shows it
+  immediately after the gem is installed.
+- Integration spec for `:trigger` mode
+  (`spec/standard_ledger/trigger_integration_spec.rb`) covers DSL
+  registration validation (missing `trigger_name`, missing block,
+  empty block, `via:` / `lock:` / `permissive:` rejection,
+  `:target_id` placeholder enforcement, double `rebuild_sql` call),
+  the strategy's no-callback contract (creating an entry does NOT
+  mutate the target via Ruby — that's the trigger's job in
+  production), and `StandardLedger.rebuild!` for both single-target
+  and walk-the-log scoping with the `<prefix>.projection.rebuilt`
+  event firing with `mode: :trigger`.
+- Doctor task spec
+  (`spec/standard_ledger/tasks/doctor_spec.rb`) mocks the
+  `connection.exec_query` against `pg_trigger` to exercise the
+  task's three behaviours (success, failure with exit 1 + stderr
+  message, ignoring entry classes without `:trigger` projections)
+  without requiring a real Postgres database.
 
 ## [0.2.0] - 2026-05-05
 

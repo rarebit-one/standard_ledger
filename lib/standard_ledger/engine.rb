@@ -15,5 +15,12 @@ module StandardLedger
       # no-op — the gem emits events but ships no internal subscribers; hosts
       # subscribe directly via ActiveSupport::Notifications.subscribe.
     end
+
+    # Engines auto-discover `lib/tasks/*.rake` in most Rails versions, but
+    # we register explicitly for defence-in-depth. Hosts get
+    # `standard_ledger:doctor` available under `bin/rails -T standard_ledger`.
+    rake_tasks do
+      load File.expand_path("../tasks/standard_ledger.rake", __dir__)
+    end
   end
 end

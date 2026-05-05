@@ -34,7 +34,7 @@ module StandardLedger
     # projections; they're `nil` for every other mode.
     Definition = Struct.new(
       :target_association, :mode, :projector_class, :handlers, :guard, :lock, :permissive,
-      :recompute_sql, :view, :refresh_options, :options,
+      :recompute_sql, :trigger_name, :view, :refresh_options, :options,
       keyword_init: true
     )
 
@@ -62,11 +62,92 @@ module StandardLedger
       #   metadata, e.g. `{ every: 5.minutes, concurrently: true }`. The
       #   gem records this on the Definition for hosts to read when wiring
       #   their scheduler; the gem does NOT auto-schedule.
+      # @param trigger_name [String, Symbol, nil] for `mode: :trigger` only —
+      #   the name of the host-owned database trigger. Required when mode is
+      #   `:trigger`; ignored otherwise. The gem does NOT create or manage
+      #   the trigger; it records the name so `standard_ledger:doctor` can
+      #   verify the trigger's presence in the connected schema.
       # @yield optional block-DSL form: register per-kind handlers via
       #   `on(:kind) { |target, entry| ... }`. Not allowed for `mode: :matview`.
       # @return [Definition] the registered projection.
-      def projects_onto(target_association, mode:, via: nil, if: nil, lock: nil, permissive: false, view: nil, refresh: nil, **options, &block)
+      def projects_onto(target_association, mode:, via: nil, if: nil, lock: nil, permissive: false, view: nil, refresh: nil, trigger_name: nil, **options, &block)
         guard = binding.local_variable_get(:if) # `if:` is a reserved keyword
+
+        if mode == :trigger
+          if via
+            raise ArgumentError,
+                  "projects_onto :#{target_association} got `via:` with mode: :trigger; " \
+                  "the trigger is the contract — there is no projector class. The host " \
+                  "owns the trigger via a Rails migration; the gem only records the " \
+                  "trigger's name and rebuild SQL"
+          end
+
+          unless lock.nil?
+            raise ArgumentError,
+                  "projects_onto :#{target_association} got `lock:` with mode: :trigger; " \
+                  "`lock:` is not supported by :trigger mode — the database trigger handles " \
+                  "concurrency atomically"
+          end
+
+          if permissive
+            raise ArgumentError,
+                  "projects_onto :#{target_association} got `permissive:` with mode: :trigger; " \
+                  "`permissive:` is not supported by :trigger mode — the trigger doesn't " \
+                  "dispatch through per-kind handlers"
+          end
+
+          if guard
+            raise ArgumentError,
+                  "projects_onto :#{target_association} got `if:` with mode: :trigger; " \
+                  "`if:` is not supported by :trigger mode — the database trigger fires " \
+                  "unconditionally from the DB on INSERT, so a Ruby-side guard would " \
+                  "silently never run"
+          end
+
+          if trigger_name.nil? || trigger_name.to_s.empty?
+            raise ArgumentError,
+                  "projects_onto :#{target_association} requires `trigger_name: \"...\"` for mode: :trigger; " \
+                  "the gem records the trigger's name so `standard_ledger:doctor` can verify its presence"
+          end
+
+          unless block
+            raise ArgumentError,
+                  "projects_onto :#{target_association} requires a block with `rebuild_sql \"...\"` for mode: :trigger"
+          end
+
+          dsl = TriggerDsl.new
+          dsl.instance_eval(&block)
+
+          if dsl.rebuild_sql_text.nil?
+            raise ArgumentError,
+                  "projects_onto :#{target_association} block is empty; mode: :trigger requires a `rebuild_sql \"...\"` clause"
+          end
+
+          unless dsl.rebuild_sql_text.include?(":target_id")
+            raise ArgumentError,
+                  "projects_onto :#{target_association} rebuild SQL must include the `:target_id` placeholder; " \
+                  "it's bound to each target's id when `StandardLedger.rebuild!` walks the log"
+          end
+
+          definition = Definition.new(
+            target_association: target_association,
+            mode: mode,
+            projector_class: nil,
+            handlers: {},
+            guard: guard,
+            lock: lock,
+            permissive: permissive,
+            recompute_sql: dsl.rebuild_sql_text,
+            trigger_name: trigger_name.to_s,
+            view: nil,
+            refresh_options: nil,
+            options: options
+          )
+
+          self.standard_ledger_projections = standard_ledger_projections + [ definition ]
+          install_mode_callbacks_for(definition)
+          return definition
+        end
 
         if mode == :sql
           if via
@@ -118,6 +199,7 @@ module StandardLedger
             lock: lock,
             permissive: permissive,
             recompute_sql: dsl.recompute_sql,
+            trigger_name: nil,
             view: nil,
             refresh_options: nil,
             options: options
@@ -150,6 +232,7 @@ module StandardLedger
             lock: lock,
             permissive: permissive,
             recompute_sql: nil,
+            trigger_name: nil,
             view: view.to_s,
             refresh_options: refresh || {},
             options: options
@@ -200,6 +283,7 @@ module StandardLedger
           lock: lock,
           permissive: permissive,
           recompute_sql: nil,
+          trigger_name: nil,
           view: nil,
           refresh_options: nil,
           options: options
@@ -226,6 +310,8 @@ module StandardLedger
           StandardLedger::Modes::Sql.install!(self)
         when :matview
           StandardLedger::Modes::Matview.install!(self)
+        when :trigger
+          StandardLedger::Modes::Trigger.install!(self)
         end
       end
 
@@ -273,6 +359,12 @@ module StandardLedger
         raise Error,
               "apply_projection! is not supported for mode: :sql; " \
               "the recompute SQL runs through `Modes::Sql#call` directly with no per-kind dispatch"
+      end
+
+      if definition.mode == :trigger
+        raise Error,
+              "apply_projection! is not supported for mode: :trigger; " \
+              "the database trigger fires from the DB on INSERT, not from Ruby"
       end
 
       return false if definition.guard && !instance_exec(&definition.guard)
@@ -355,6 +447,29 @@ module StandardLedger
                 ":sql mode supports exactly one recompute clause per projection"
         end
         @recompute_sql = sql
+      end
+    end
+
+    # Internal collector for the `:trigger`-mode block-DSL form. Captures
+    # the `rebuild_sql "..."` clause's SQL string. The trigger itself is
+    # owned by the host (created in a Rails migration); the gem only
+    # records this rebuild SQL so `StandardLedger.rebuild!` can recompute
+    # the projection from the log when invoked. Like `:sql` mode, the SQL
+    # must be expressible as a single statement with `:target_id` bound
+    # from each target's id at rebuild time.
+    class TriggerDsl
+      attr_reader :rebuild_sql_text
+
+      def rebuild_sql(sql)
+        unless sql.is_a?(String)
+          raise ArgumentError, "rebuild_sql requires a SQL string; got #{sql.class}"
+        end
+        unless @rebuild_sql_text.nil?
+          raise ArgumentError,
+                "rebuild_sql called more than once in the same projects_onto block; " \
+                ":trigger mode supports exactly one rebuild_sql clause per projection"
+        end
+        @rebuild_sql_text = sql
       end
     end
   end

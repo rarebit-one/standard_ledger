@@ -2,10 +2,11 @@
 
 Immutable journal entries with declarative aggregate projections for Rails apps.
 
-> **Status: v0.2.0** — production-ready for `:inline`, `:sql`, and `:matview`
-> projections (covering luminality-web, fundbright-web, and sidekick-web's
-> needs). `:async` and `:trigger` modes ship in subsequent PRs ahead of
-> nutripod-web adoption. See [`standard_ledger-design.md`](https://github.com/rarebit-one/standard_ledger/blob/main/standard_ledger-design.md)
+> **Status: v0.2.0** — production-ready for `:inline`, `:sql`, `:matview`,
+> and `:trigger` projections (covering luminality-web, fundbright-web,
+> sidekick-web, and nutripod-web's inventory). `:async` mode ships in a
+> subsequent PR ahead of nutripod-web's payments / fulfillment adoption.
+> See [`standard_ledger-design.md`](https://github.com/rarebit-one/standard_ledger/blob/main/standard_ledger-design.md)
 > for the full design and rollout plan.
 
 ## What it is
@@ -131,6 +132,58 @@ The gem binds `:target_id` from the entry's foreign key. The recompute
 SQL is the entire contract — `:sql` projections are naturally
 rebuildable: `StandardLedger.rebuild!` runs the same statement against
 every target the log references.
+
+When the host **already has** a database trigger that updates the
+projection target on every entry INSERT, register it with `mode: :trigger`
+so the gem records the trigger's name and the equivalent rebuild SQL —
+without taking ownership of the trigger DDL. The host writes the trigger
+in a Rails migration; the gem only consumes the metadata.
+
+```ruby
+class InventoryRecord < ApplicationRecord
+  include StandardLedger::Entry
+  include StandardLedger::Projector
+
+  belongs_to :sku
+
+  ledger_entry kind: :action, idempotency_key: :serial_no, scope: :organisation_id
+
+  projects_onto :sku, mode: :trigger,
+                      trigger_name: "inventory_records_apply_to_skus" do
+    rebuild_sql <<~SQL
+      UPDATE skus SET
+        total_count    = c.total_count,
+        reserved_count = c.reserved_count,
+        free_count     = c.total_count - c.reserved_count
+      FROM (
+        SELECT sku_id,
+               COUNT(*) FILTER (WHERE action IN ('grant','adjust_in')) AS total_count,
+               COUNT(*) FILTER (WHERE action = 'reserve')              AS reserved_count
+        FROM inventory_records
+        WHERE sku_id = :target_id
+        GROUP BY sku_id
+      ) c
+      WHERE skus.id = :target_id AND skus.id = c.sku_id
+    SQL
+  end
+end
+```
+
+The trigger continues to fire on every `INSERT` (the host owns the DDL);
+the gem records the trigger name + rebuild SQL for two purposes:
+
+- `StandardLedger.rebuild!(InventoryRecord, target: sku)` runs the
+  recorded `rebuild_sql` with `:target_id` bound to each target's id.
+- `bin/rails standard_ledger:doctor` verifies that every registered
+  `:trigger` projection's named trigger exists in the connected schema
+  (queries `pg_trigger`). Run this as a deploy-time check — migration
+  drift surfaces immediately rather than at runtime. **Postgres-only**;
+  the task raises on non-Postgres connections.
+
+Registration rejects `via:`, `lock:`, and `permissive:` (none are
+meaningful when the trigger itself is the contract). The `trigger_name:`
+keyword is required; the block must call `rebuild_sql "..."` exactly
+once with a SQL string containing the `:target_id` placeholder.
 
 Refresh a `:matview` projection ad-hoc when the host needs immediate
 read-your-write semantics (e.g. at the end of a draw operation, before
