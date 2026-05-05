@@ -5,6 +5,7 @@ require "concurrent"
 
 require "standard_ledger/version"
 require "standard_ledger/errors"
+require "standard_ledger/event_emitter"
 require "standard_ledger/result"
 require "standard_ledger/config"
 require "standard_ledger/entry"
@@ -527,7 +528,7 @@ module StandardLedger
       end
 
       prefix = config.notification_namespace
-      ActiveSupport::Notifications.instrument(
+      StandardLedger::EventEmitter.emit(
         "#{prefix}.projection.rebuilt",
         entry_class: entry_class, target: target, projection: definition, mode: definition.mode
       )
@@ -545,7 +546,7 @@ module StandardLedger
       end
 
       prefix = config.notification_namespace
-      ActiveSupport::Notifications.instrument(
+      StandardLedger::EventEmitter.emit(
         "#{prefix}.projection.rebuilt",
         entry_class: entry_class, target: target, projection: definition, mode: definition.mode
       )

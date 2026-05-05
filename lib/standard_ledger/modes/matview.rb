@@ -71,7 +71,7 @@ module StandardLedger
         ActiveRecord::Base.connection.execute(sql)
 
         duration_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000.0
-        ActiveSupport::Notifications.instrument(
+        StandardLedger::EventEmitter.emit(
           "#{prefix}.projection.refreshed",
           view: view_name.to_s, concurrently: concurrently, duration_ms: duration_ms
         )
@@ -80,7 +80,7 @@ module StandardLedger
         # the failed notification — the SQL was never issued.
         raise if e.is_a?(ArgumentError)
 
-        ActiveSupport::Notifications.instrument(
+        StandardLedger::EventEmitter.emit(
           "#{prefix}.projection.failed",
           view: view_name.to_s, concurrently: concurrently, error: e
         )

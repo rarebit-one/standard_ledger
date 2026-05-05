@@ -156,7 +156,7 @@ module StandardLedger
           begin
             yield
           rescue StandardError => e
-            ActiveSupport::Notifications.instrument(
+            StandardLedger::EventEmitter.emit(
               "#{prefix}.projection.failed",
               entry: entry, target: target, projection: definition, error: e
             )
@@ -166,7 +166,7 @@ module StandardLedger
         return false unless ran
 
         duration_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000.0
-        ActiveSupport::Notifications.instrument(
+        StandardLedger::EventEmitter.emit(
           "#{prefix}.projection.applied",
           entry: entry, target: target, projection: definition,
           mode: :inline, duration_ms: duration_ms
