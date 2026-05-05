@@ -82,7 +82,7 @@ module StandardLedger
 
         StandardLedger::EventEmitter.emit(
           "#{prefix}.projection.failed",
-          view: view_name.to_s, concurrently: concurrently, error: e
+          view: view_name.to_s, concurrently: concurrently, mode: :matview, error: e
         )
         raise
       end

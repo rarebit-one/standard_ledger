@@ -115,7 +115,7 @@ module StandardLedger
           StandardLedger::EventEmitter.emit(
             "#{prefix}.projection.failed",
             entry: entry, target: nil, projection: definition.target_association,
-            error: e, duration_ms: duration_ms
+            mode: :sql, error: e, duration_ms: duration_ms
           )
           raise
         end

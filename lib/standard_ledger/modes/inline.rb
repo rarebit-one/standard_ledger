@@ -160,7 +160,7 @@ module StandardLedger
             StandardLedger::EventEmitter.emit(
               "#{prefix}.projection.failed",
               entry: entry, target: target, projection: definition.target_association,
-              error: e, duration_ms: duration_ms
+              mode: :inline, error: e, duration_ms: duration_ms
             )
             raise
           end

@@ -8,9 +8,7 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 Nothing yet.
 
-### Added
-
-## [0.2.0] — 2026-05-05
+## [0.2.0] - 2026-05-05
 
 ### Added
 - `StandardLedger::EventEmitter` — internal dispatcher that routes
@@ -219,7 +217,7 @@ Nothing yet.
   block-form / no-`rebuild` / unsupported-mode raises, the
   `projection.rebuilt` notification, and host Result interop.
 
-## [0.1.0] — 2026-05-04
+## [0.1.0] - 2026-05-04
 
 Initial scaffold. Establishes the gem layout, public API surface stubs, and the
 build/test pipeline. **Not yet usable in production** — see the design doc
