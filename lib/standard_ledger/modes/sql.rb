@@ -112,7 +112,7 @@ module StandardLedger
           entry.class.connection.exec_update(sql)
         rescue StandardError => e
           duration_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000.0
-          ActiveSupport::Notifications.instrument(
+          StandardLedger::EventEmitter.emit(
             "#{prefix}.projection.failed",
             entry: entry, target: nil, projection: definition, error: e, duration_ms: duration_ms
           )
@@ -120,7 +120,7 @@ module StandardLedger
         end
 
         duration_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000.0
-        ActiveSupport::Notifications.instrument(
+        StandardLedger::EventEmitter.emit(
           "#{prefix}.projection.applied",
           entry: entry, target: nil, projection: definition,
           mode: :sql, duration_ms: duration_ms

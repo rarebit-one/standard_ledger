@@ -244,7 +244,7 @@ module StandardLedger
       kind_value = config ? public_send(config[:kind]) : nil
       prefix = StandardLedger.config.notification_namespace
 
-      ActiveSupport::Notifications.instrument(
+      StandardLedger::EventEmitter.emit(
         "#{prefix}.entry.created",
         entry: self, kind: kind_value, targets: standard_ledger_targets
       )

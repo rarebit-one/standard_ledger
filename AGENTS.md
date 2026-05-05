@@ -31,6 +31,7 @@ standard_ledger/
 ├── lib/standard_ledger/
 │   ├── version.rb        # Gem version
 │   ├── errors.rb         # Error hierarchy
+│   ├── event_emitter.rb  # Routes events to Rails.event.notify (Rails 8.1+) or ActiveSupport::Notifications
 │   ├── result.rb         # StandardLedger::Result (default return type)
 │   ├── config.rb         # StandardLedger.configure { |c| ... }
 │   ├── engine.rb         # Rails engine boot hook

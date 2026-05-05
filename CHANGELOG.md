@@ -7,6 +7,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `StandardLedger::EventEmitter` — internal dispatcher that routes
+  gem events through `Rails.event.notify` on Rails 8.1+ and falls back
+  to `ActiveSupport::Notifications.instrument` on older Rails. Subscriber
+  exceptions are swallowed (printed via `warn`) so observability cannot
+  break the host's request path. All existing event names and payloads
+  are preserved — host subscribers via `ActiveSupport::Notifications.subscribe`
+  continue to work unchanged. Mirrors the `StandardCircuit::EventEmitter`
+  pattern for cross-gem consistency.
 - `:matview` projection mode + ad-hoc refresh API. The host owns the
   PostgreSQL materialized view (created in a migration via `scenic` or
   hand-rolled SQL); the gem owns the refresh schedule and the ad-hoc
