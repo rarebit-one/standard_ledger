@@ -18,8 +18,8 @@ module StandardLedger
     # host's request path (the projection has already either succeeded or
     # been rolled back by the time we emit).
     def emit(event_name, payload)
-      if rails_event_available?
-        ::Rails.event.notify(event_name, **payload)
+      if (bus = rails_event_bus)
+        bus.notify(event_name, **payload)
       else
         ::ActiveSupport::Notifications.instrument(event_name, payload)
       end
@@ -27,10 +27,21 @@ module StandardLedger
       warn "[StandardLedger] event emit for #{event_name.inspect} failed: #{e.class}: #{e.message}"
     end
 
+    # Returns the Rails 8.1+ structured event bus when available, or `nil`
+    # to signal the AS::Notifications fallback. Single accessor so `emit`
+    # invokes `Rails.event` only once per call.
+    def rails_event_bus
+      return nil unless defined?(::Rails) &&
+                        ::Rails.respond_to?(:event) &&
+                        ::Rails.event.respond_to?(:notify)
+
+      ::Rails.event
+    end
+
+    # Boolean shorthand kept for callers (and specs) that just want to know
+    # whether the modern bus is live.
     def rails_event_available?
-      defined?(::Rails) &&
-        ::Rails.respond_to?(:event) &&
-        ::Rails.event.respond_to?(:notify)
+      !rails_event_bus.nil?
     end
   end
 end

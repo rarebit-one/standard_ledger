@@ -37,32 +37,46 @@ RSpec.describe StandardLedger::EventEmitter do
       end
     end
 
-    it "swallows subscriber failures so ledger observability cannot break a host request" do
-      faulty_rails = Module.new
-      faulty_rails.define_singleton_method(:respond_to?) { |m, *| m == :event || super(m) }
-      faulty_event = Object.new
-      faulty_event.define_singleton_method(:respond_to?) { |m, *| m == :notify || super(m) }
-      faulty_event.define_singleton_method(:notify) { |*| raise "subscriber blew up" }
-      faulty_rails.define_singleton_method(:event) { faulty_event }
-      stub_const("Rails", faulty_rails)
+    context "when the chosen backend raises" do
+      # Stub a Rails.event whose notify always raises — exercises the rescue
+      # in `emit` from the modern-bus path. The fallback path is exercised
+      # below by stubbing AS::Notifications.instrument directly.
+      def stub_faulty_rails_event!
+        faulty_event = Object.new
+        faulty_event.define_singleton_method(:respond_to?) { |m, *| m == :notify || super(m) }
+        faulty_event.define_singleton_method(:notify) { |*| raise "subscriber blew up" }
 
-      expect {
-        described_class.emit("standard_ledger.entry.created", { entry: "x" })
-      }.not_to raise_error
-    end
+        faulty_rails = Module.new
+        faulty_rails.define_singleton_method(:respond_to?) { |m, *| m == :event || super(m) }
+        faulty_rails.define_singleton_method(:event) { faulty_event }
 
-    it "prints a warning when an emit fails" do
-      faulty_rails = Module.new
-      faulty_rails.define_singleton_method(:respond_to?) { |m, *| m == :event || super(m) }
-      faulty_event = Object.new
-      faulty_event.define_singleton_method(:respond_to?) { |m, *| m == :notify || super(m) }
-      faulty_event.define_singleton_method(:notify) { |*| raise "subscriber blew up" }
-      faulty_rails.define_singleton_method(:event) { faulty_event }
-      stub_const("Rails", faulty_rails)
+        stub_const("Rails", faulty_rails)
+      end
 
-      expect {
-        described_class.emit("standard_ledger.entry.created", { entry: "x" })
-      }.to output(/\[StandardLedger\] event emit for "standard_ledger.entry.created" failed: RuntimeError: subscriber blew up/).to_stderr
+      it "swallows subscriber failures so ledger observability cannot break a host request" do
+        stub_faulty_rails_event!
+
+        expect {
+          described_class.emit("standard_ledger.entry.created", { entry: "x" })
+        }.not_to raise_error
+      end
+
+      it "prints a warning when an emit fails on the Rails.event path" do
+        stub_faulty_rails_event!
+
+        expect {
+          described_class.emit("standard_ledger.entry.created", { entry: "x" })
+        }.to output(/\[StandardLedger\] event emit for "standard_ledger.entry.created" failed: RuntimeError: subscriber blew up/).to_stderr
+      end
+
+      it "swallows failures on the AS::Notifications fallback path too" do
+        hide_const("Rails") if defined?(::Rails)
+        allow(ActiveSupport::Notifications).to receive(:instrument).and_raise("subscriber blew up")
+
+        expect {
+          described_class.emit("standard_ledger.entry.created", { entry: "x" })
+        }.to output(/\[StandardLedger\] event emit for "standard_ledger.entry.created" failed: RuntimeError: subscriber blew up/).to_stderr
+      end
     end
   end
 
