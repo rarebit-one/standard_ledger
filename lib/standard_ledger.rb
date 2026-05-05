@@ -14,6 +14,7 @@ require "standard_ledger/projector"
 require "standard_ledger/modes/inline"
 require "standard_ledger/modes/sql"
 require "standard_ledger/modes/matview"
+require "standard_ledger/modes/trigger"
 require "standard_ledger/jobs/matview_refresh_job"
 require "standard_ledger/engine" if defined?(::Rails::Engine)
 
@@ -197,9 +198,15 @@ module StandardLedger
     #   refresh *is* rebuild. Postgres has no partial-refresh primitive,
     #   so `target:` / `target_class:` scope arguments are ignored for
     #   `:matview` projections and the full view is always refreshed.
-    # - `:async`, `:sql`, `:trigger` modes are not yet supported by
-    #   `rebuild!`; they raise `StandardLedger::Error`. Each lands with
-    #   its mode's own PR.
+    # - `:sql` and `:trigger` projections rebuild by running their
+    #   recorded rebuild SQL with `:target_id` bound to each target's
+    #   id. For `:trigger`, the database trigger fires on entry INSERT;
+    #   `rebuild!` runs the same logical recompute against each target
+    #   the log references. The gem does NOT verify or recreate the
+    #   trigger here — `standard_ledger:doctor` is the deploy-time
+    #   check for trigger presence.
+    # - `:async` mode is not yet supported by `rebuild!`; it raises
+    #   `StandardLedger::Error`. It lands with its own PR.
     #
     # Atomicity: each (target, projection) pair runs in its own
     # transaction. A failure mid-loop is **not** rolled back — earlier
@@ -281,7 +288,7 @@ module StandardLedger
         validate_rebuildable_projector!(entry_class, definition)
 
         each_rebuild_target(entry_class, definition, target: target, batch_size: batch_size) do |t|
-          if definition.mode == :sql
+          if definition.mode == :sql || definition.mode == :trigger
             rebuild_one_sql(entry_class, definition, t)
           else
             rebuild_one(entry_class, definition, t)
@@ -421,12 +428,13 @@ module StandardLedger
     end
 
     # Refuse to rebuild for modes that don't yet implement the
-    # log-replay path. `:inline`, `:sql`, and `:matview` are the supported
-    # modes today; `:async` and `:trigger` land with their own mode PRs.
+    # log-replay path. `:inline`, `:sql`, `:matview`, and `:trigger` are
+    # the supported modes today; `:async` lands with its own mode PR.
     def validate_rebuildable_mode!(entry_class, definition)
       return if definition.mode == :inline
       return if definition.mode == :sql
       return if definition.mode == :matview
+      return if definition.mode == :trigger
 
       raise StandardLedger::Error,
             "rebuild! does not yet support mode: #{definition.mode.inspect} " \
@@ -463,10 +471,12 @@ module StandardLedger
     # rebuildable should extract a `Projection` subclass and implement
     # `rebuild(target)`.
     def validate_rebuildable_projector!(entry_class, definition)
-      # `:sql` mode carries its rebuild path in the recompute SQL itself —
-      # no projector class is required (and `via:` is rejected at
-      # registration). Skip the class-form preflight checks below.
+      # `:sql` and `:trigger` modes carry their rebuild path in the
+      # recompute / rebuild SQL itself — no projector class is required
+      # (and `via:` is rejected at registration). Skip the class-form
+      # preflight checks below.
       return if definition.mode == :sql
+      return if definition.mode == :trigger
 
       if definition.projector_class.nil?
         raise StandardLedger::NotRebuildable,
@@ -535,11 +545,12 @@ module StandardLedger
       )
     end
 
-    # `:sql` mode rebuild path: run the same recompute SQL the
-    # `after_create` callback runs, just bound to this target's id rather
-    # than the entry's foreign key. The recompute SQL is the entire
-    # contract for `:sql` projections — there's no projector class to
-    # invoke; the after-create and rebuild paths share one statement.
+    # `:sql` / `:trigger` mode rebuild path: run the recorded recompute
+    # SQL bound to this target's id. For `:sql` mode this is the same
+    # statement the `after_create` callback runs; for `:trigger` mode
+    # it's the rebuild SQL the host registered (the database trigger
+    # itself owns the after-INSERT path). Either way there's no
+    # projector class to invoke — the SQL is the entire contract.
     def rebuild_one_sql(entry_class, definition, target)
       target.class.transaction do
         sql = ActiveRecord::Base.sanitize_sql_array([ definition.recompute_sql, { target_id: target.id } ])
