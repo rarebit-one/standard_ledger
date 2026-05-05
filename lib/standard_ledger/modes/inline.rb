@@ -156,9 +156,11 @@ module StandardLedger
           begin
             yield
           rescue StandardError => e
+            duration_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000.0
             StandardLedger::EventEmitter.emit(
               "#{prefix}.projection.failed",
-              entry: entry, target: target, projection: definition, error: e
+              entry: entry, target: target, projection: definition.target_association,
+              error: e, duration_ms: duration_ms
             )
             raise
           end
@@ -168,7 +170,7 @@ module StandardLedger
         duration_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000.0
         StandardLedger::EventEmitter.emit(
           "#{prefix}.projection.applied",
-          entry: entry, target: target, projection: definition,
+          entry: entry, target: target, projection: definition.target_association,
           mode: :inline, duration_ms: duration_ms
         )
         true

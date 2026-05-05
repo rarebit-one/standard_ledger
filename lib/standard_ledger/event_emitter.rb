@@ -43,5 +43,13 @@ module StandardLedger
     def rails_event_available?
       !rails_event_bus.nil?
     end
+
+    # `rails_event_bus` is an implementation detail — only `emit` and
+    # `rails_event_available?` should reach for it. `module_function`
+    # exposes every method as a public module-level method by default,
+    # so we mark this one private explicitly. `private_class_method`
+    # privatises the singleton-method copy that `module_function`
+    # generated, hiding it from `EventEmitter.rails_event_bus` callers.
+    private_class_method :rails_event_bus
   end
 end

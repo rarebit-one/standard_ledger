@@ -44,8 +44,8 @@ module StandardLedger
       new(success: true, value: entry, entry: entry, idempotent: idempotent, projections: projections)
     end
 
-    def self.failure(errors:, entry: nil)
-      new(success: false, errors: Array(errors), entry: entry)
+    def self.failure(errors:, entry: nil, projections: {})
+      new(success: false, errors: Array(errors), entry: entry, projections: projections)
     end
   end
 end

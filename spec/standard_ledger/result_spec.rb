@@ -38,5 +38,10 @@ RSpec.describe StandardLedger::Result do
       result = described_class.failure(errors: [ "a", "b" ])
       expect(result.errors).to eq([ "a", "b" ])
     end
+
+    it "accepts a projections: keyword and exposes it via #projections" do
+      result = described_class.failure(errors: "boom", projections: { inline: [] })
+      expect(result.projections).to eq(inline: [])
+    end
   end
 end

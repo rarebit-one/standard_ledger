@@ -132,7 +132,7 @@ RSpec.describe "StandardLedger.rebuild! (end-to-end)" do
       payload = events.first
       expect(payload[:entry_class]).to eq(VoucherRecord)
       expect(payload[:target]).to eq(scheme)
-      expect(payload[:projection].target_association).to eq(:voucher_scheme)
+      expect(payload[:projection]).to eq(:voucher_scheme)
       expect(payload[:mode]).to eq(:inline)
     ensure
       ActiveSupport::Notifications.unsubscribe(sub) if sub

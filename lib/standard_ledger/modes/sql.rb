@@ -114,7 +114,8 @@ module StandardLedger
           duration_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000.0
           StandardLedger::EventEmitter.emit(
             "#{prefix}.projection.failed",
-            entry: entry, target: nil, projection: definition, error: e, duration_ms: duration_ms
+            entry: entry, target: nil, projection: definition.target_association,
+            error: e, duration_ms: duration_ms
           )
           raise
         end
@@ -122,7 +123,7 @@ module StandardLedger
         duration_ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000.0
         StandardLedger::EventEmitter.emit(
           "#{prefix}.projection.applied",
-          entry: entry, target: nil, projection: definition,
+          entry: entry, target: nil, projection: definition.target_association,
           mode: :sql, duration_ms: duration_ms
         )
       end

@@ -39,7 +39,8 @@ module StandardLedger
     # Prefix for `ActiveSupport::Notifications` events emitted by the gem.
     # Default: `"standard_ledger"`. Events:
     # `<prefix>.entry.created`, `<prefix>.projection.applied`,
-    # `<prefix>.projection.failed`.
+    # `<prefix>.projection.failed`, `<prefix>.projection.refreshed`,
+    # `<prefix>.projection.rebuilt`.
     attr_accessor :notification_namespace
 
     def initialize

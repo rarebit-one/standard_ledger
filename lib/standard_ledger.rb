@@ -530,7 +530,8 @@ module StandardLedger
       prefix = config.notification_namespace
       StandardLedger::EventEmitter.emit(
         "#{prefix}.projection.rebuilt",
-        entry_class: entry_class, target: target, projection: definition, mode: definition.mode
+        entry_class: entry_class, target: target,
+        projection: definition.target_association, mode: definition.mode
       )
     end
 
@@ -548,7 +549,8 @@ module StandardLedger
       prefix = config.notification_namespace
       StandardLedger::EventEmitter.emit(
         "#{prefix}.projection.rebuilt",
-        entry_class: entry_class, target: target, projection: definition, mode: definition.mode
+        entry_class: entry_class, target: target,
+        projection: definition.target_association, mode: definition.mode
       )
     end
 
@@ -579,7 +581,7 @@ module StandardLedger
       elsif success
         Result.success(entry: entry, idempotent: idempotent, projections: projections)
       else
-        Result.failure(errors: errors, entry: entry)
+        Result.failure(errors: errors, entry: entry, projections: projections)
       end
     end
 
