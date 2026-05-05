@@ -51,8 +51,8 @@ module StandardLedger
         unless entry_class.respond_to?(:after_create_commit)
           raise ArgumentError,
                 "Modes::Async requires an ActiveRecord-backed entry class on " \
-                "#{entry_class.name || entry_class.inspect} — add `belongs_to :entry_class` " \
-                "lookups via AR; use :inline mode for plain Ruby"
+                "#{entry_class.name || entry_class.inspect} — the entry class must inherit " \
+                "from ActiveRecord::Base. Use :inline mode for plain-Ruby entry classes."
         end
 
         entry_class.after_create_commit { StandardLedger::Modes::Async.new.call(self) }
@@ -90,7 +90,8 @@ module StandardLedger
             target = entry.public_send(definition.target_association)
             next if target.nil?
 
-            StandardLedger::ProjectionJob.perform_later(entry, definition.target_association.to_s)
+            job_class = StandardLedger.config.default_async_job || StandardLedger::ProjectionJob
+            job_class.perform_later(entry, definition.target_association.to_s)
           end
         end
       end

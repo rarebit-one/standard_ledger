@@ -43,6 +43,16 @@ module StandardLedger
       end
     end
 
+    # Discard programmer errors immediately — they're deterministic and
+    # retrying just burns the budget. `StandardLedger::Error` is raised by
+    # `#perform` on missing/renamed projection definitions and similar
+    # bookkeeping mistakes; the next attempt would raise the same error.
+    # Declared AFTER the `rescue_from(StandardError)` block above because
+    # `ActiveSupport::Rescuable` searches handlers from the most-recently-
+    # registered first — so this more-specific `StandardLedger::Error`
+    # handler wins over the catch-all retry path for its matching errors.
+    discard_on StandardLedger::Error
+
     def perform(entry, target_association)
       definition = entry.class.standard_ledger_projections.find { |d|
         d.mode == :async && d.target_association == target_association.to_sym

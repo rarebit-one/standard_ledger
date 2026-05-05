@@ -162,6 +162,21 @@ RSpec.describe "StandardLedger async mode (end-to-end)" do
         end
       }.to raise_error(ArgumentError, /permissive/)
     end
+
+    it "raises ArgumentError when lock: is supplied (redundant — :async always with_locks)" do
+      projector = scheme_projector_class
+      expect {
+        Class.new(ActiveRecord::Base) do
+          self.table_name = "voucher_records"
+          include StandardLedger::Entry
+          include StandardLedger::Projector
+          belongs_to :voucher_scheme, optional: true
+          ledger_entry kind: :action, idempotency_key: :serial_no, scope: :organisation_id
+
+          projects_onto :voucher_scheme, mode: :async, via: projector, lock: :pessimistic
+        end
+      }.to raise_error(ArgumentError, /`lock:` with mode: :async/)
+    end
   end
 
   describe "after_create_commit enqueue" do
@@ -227,6 +242,26 @@ RSpec.describe "StandardLedger async mode (end-to-end)" do
       )
 
       expect(enqueued_jobs).to be_empty
+    end
+
+    it "uses Config#default_async_job when set so hosts can swap the job class" do
+      stub_const("CustomProjectionJob", Class.new(StandardLedger::ProjectionJob))
+
+      prior_job = StandardLedger.config.default_async_job
+      StandardLedger.config.default_async_job = CustomProjectionJob
+      begin
+        StandardLedger.post(
+          VoucherRecord,
+          kind:    "grant",
+          targets: { voucher_scheme: scheme },
+          attrs:   { organisation_id: "org-1", serial_no: "v-async-custom-job" }
+        )
+
+        expect(enqueued_jobs.size).to eq(1)
+        expect(enqueued_jobs.first["job_class"]).to eq("CustomProjectionJob")
+      ensure
+        StandardLedger.config.default_async_job = prior_job
+      end
     end
   end
 
@@ -374,6 +409,43 @@ RSpec.describe "StandardLedger async mode (end-to-end)" do
 
       expect(applied_events).to be_empty
       expect(failed_events).to be_empty
+    end
+
+    it "discards (no retry) when StandardLedger::Error is raised — programmer error, not transient" do
+      # Post an entry so the queue holds a real job.
+      StandardLedger.post(
+        VoucherRecord,
+        kind:    "grant",
+        targets: { voucher_scheme: scheme },
+        attrs:   { organisation_id: "org-1", serial_no: "v-async-discard" }
+      )
+      expect(enqueued_jobs.size).to eq(1)
+
+      # Simulate a definition mismatch: clear the registered projections
+      # before the job perform runs. The job's lookup returns nil and
+      # raises StandardLedger::Error — a deterministic programmer error
+      # that should NOT consume the retry budget.
+      original_projections = VoucherRecord.standard_ledger_projections
+      VoucherRecord.standard_ledger_projections = []
+
+      retry_calls = 0
+      allow_any_instance_of(StandardLedger::ProjectionJob).to receive(:retry_job).and_wrap_original do |original, *args, **kwargs|
+        retry_calls += 1
+        original.call(*args, **kwargs)
+      end
+
+      begin
+        # `discard_on` swallows the matched error so the perform call
+        # itself does NOT raise, and no retry is enqueued.
+        expect { perform_enqueued_jobs }.not_to raise_error
+      ensure
+        VoucherRecord.standard_ledger_projections = original_projections
+      end
+
+      # No retries scheduled — discard short-circuits the rescue_from path.
+      expect(retry_calls).to eq(0)
+      # And the queue is empty (the job was discarded, not re-enqueued).
+      expect(enqueued_jobs).to be_empty
     end
   end
 
