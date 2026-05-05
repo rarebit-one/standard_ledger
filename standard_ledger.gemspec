@@ -7,7 +7,7 @@ Gem::Specification.new do |spec|
   spec.email       = [ "code@jaryl.dev" ]
   spec.homepage    = "https://github.com/rarebit-one/standard_ledger"
   spec.summary     = "Immutable journal entries with declarative aggregate projections for Rails apps."
-  spec.description = "StandardLedger captures the recurring 'append-only entry → N projection updates' pattern as a declarative DSL on host ActiveRecord models. Supports inline, sql, and matview projection modes (async and trigger modes land in subsequent releases); enforces idempotency-by-unique-index; and provides a deterministic rebuild path from the entry log."
+  spec.description = "StandardLedger captures the recurring 'append-only entry → N projection updates' pattern as a declarative DSL on host ActiveRecord models. Supports five projection modes — :inline, :async, :sql, :matview, :trigger — plus a deterministic rebuild path from the entry log, ad-hoc materialized view refresh, and a doctor rake task that verifies host-owned trigger presence. Enforces idempotency-by-unique-index and immutability at the entry level."
   spec.license     = "MIT"
 
   spec.metadata["homepage_uri"] = spec.homepage
