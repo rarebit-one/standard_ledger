@@ -7,6 +7,48 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `:matview` projection mode + ad-hoc refresh API. The host owns the
+  PostgreSQL materialized view (created in a migration via `scenic` or
+  hand-rolled SQL); the gem owns the refresh schedule and the ad-hoc
+  refresh primitive.
+  - `projects_onto :assoc, mode: :matview, view: "view_name", refresh: { every: 5.minutes, concurrently: true }`
+    declares a matview projection. The `view:` keyword is required;
+    `refresh:` is optional metadata for the host's scheduler. Block-DSL
+    is not accepted (matview projections have no per-kind handlers —
+    they refresh on a schedule). `Definition` gains `view` and
+    `refresh_options` fields, populated only for `:matview` mode.
+  - `StandardLedger::Modes::Matview` strategy — `install!` records the
+    matview registration on the entry class without installing any
+    `after_create` callback (matview is scheduled, not entry-driven);
+    `.refresh!(view_name, concurrently:)` issues `REFRESH MATERIALIZED
+    VIEW [CONCURRENTLY] <view_name>` against the active connection,
+    instruments `<prefix>.projection.refreshed` on success and
+    `<prefix>.projection.failed` on raise (re-raising so the host's
+    scheduler / job runner sees the failure). The `view_name` is
+    validated against `/\A[a-zA-Z_][a-zA-Z0-9_.]*\z/` to refuse SQL
+    injection via crafted identifiers.
+  - `StandardLedger.refresh!(view_name, concurrently: nil)` — module-level
+    ad-hoc refresh API. `concurrently: nil` (default) consults
+    `Config#matview_refresh_strategy`; `true`/`false` overrides per call.
+    Returns a `Result` with `projections[:refreshed]` listing the view
+    refreshed; re-raises on SQL failure after firing the `failed` event.
+    Hosts call this at the end of read-your-write-critical operations
+    (e.g. luminality's `PromptPacks::DrawOperation` refreshing
+    `user_prompt_inventories` after a draw).
+  - `StandardLedger::MatviewRefreshJob` — thin `ActiveJob::Base` wrapper
+    around `StandardLedger.refresh!`. Hosts wire their scheduler
+    (SolidQueue Recurring Tasks, sidekiq-cron, etc.) at this job class
+    with `(view_name, concurrently:)` arguments. The gem deliberately
+    does not auto-schedule — schedule cadence and backend selection is a
+    host concern.
+  - `StandardLedger.rebuild!(EntryClass)` extends to `:matview`
+    projections: each registered matview projection triggers a single
+    `refresh!` (no per-target loop — the matview holds state for every
+    target in one relation). `target:` / `target_class:` scoping is
+    silently ignored for matviews (Postgres has no partial-refresh
+    primitive). `result.projections[:rebuilt]` includes a
+    `{ target_class: nil, target_id: nil, projection:, view: }` entry per
+    refreshed view.
 - `:sql` mode: single-`UPDATE` recompute projections that bind
   `:target_id` from the entry's foreign key. Block-DSL takes a single
   `recompute "..."` clause instead of per-kind `on(:kind)` handlers; the
@@ -17,17 +59,17 @@ project adheres to [Semantic Versioning](https://semver.org/).
   `<prefix>.projection.applied` (mode: `:sql`, `target: nil`, includes
   `duration_ms`) and `<prefix>.projection.failed` (re-raises after the
   payload is published). Registration validates that `:target_id`
-  appears in the SQL, that no `via:` is supplied (the recompute SQL is
-  the contract), and that the block actually called `recompute`.
+  appears in the SQL, that no `via:`/`lock:`/`permissive:` are supplied
+  (none are meaningful for `:sql` mode — the recompute SQL is the whole
+  contract), and that the block actually called `recompute` exactly once.
   `StandardLedger.rebuild!` runs the same statement against each target
   the log references; `target:` / `target_class:` / no-arg scoping
   works the same as for `:inline`.
-- Integration spec
-  (`spec/standard_ledger/sql_integration_spec.rb`) covers the
-  end-to-end `:sql` flow: registration validation, after-create
-  execution, transactional rollback, `if:`-guard skip, nil-FK skip,
-  notifications, idempotent install, and rebuild over single + all
-  targets.
+- Integration specs for both new modes
+  (`spec/standard_ledger/sql_integration_spec.rb` and
+  `spec/standard_ledger/matview_integration_spec.rb`) cover the
+  end-to-end flows including registration validation, transactional
+  semantics, notifications, idempotent install, and rebuild paths.
 - Install generator: `rails g standard_ledger:install` writes
   `config/initializers/standard_ledger.rb` with commented-out examples
   covering every public `Config` setting (async retries, scheduler,
@@ -197,10 +239,8 @@ roadmap.
 - GitHub Actions CI on Ruby 3.4.4 running RSpec + RuboCop.
 
 ### Pending (tracked in design doc, lands in subsequent PRs)
-- `StandardLedger.refresh!(:view_name)` ad-hoc matview refresh.
-- Remaining mode implementations: `:async` (`ProjectionJob` + `with_lock`),
-  `:trigger` (host-owned, gem records rebuild SQL), `:matview`
-  (`MatviewRefreshJob` + ad-hoc refresh).
+- Remaining mode implementations: `:async` (`ProjectionJob` + `with_lock`)
+  and `:trigger` (host-owned, gem records rebuild SQL).
 - `standard_ledger:doctor` rake task (verifies trigger presence, etc.).
 
 [Unreleased]: https://github.com/rarebit-one/standard_ledger/compare/v0.1.0...HEAD

@@ -29,9 +29,12 @@ module StandardLedger
     # Captures the per-projection configuration declared by `projects_onto`.
     # Stored on the entry class so `StandardLedger.post` and
     # `StandardLedger.rebuild!` can iterate over them at runtime.
+    #
+    # `:view` and `:refresh_options` are populated only for `:matview`-mode
+    # projections; they're `nil` for every other mode.
     Definition = Struct.new(
       :target_association, :mode, :projector_class, :handlers, :guard, :lock, :permissive,
-      :recompute_sql, :options,
+      :recompute_sql, :view, :refresh_options, :options,
       keyword_init: true
     )
 
@@ -52,10 +55,17 @@ module StandardLedger
       # @param permissive [Boolean] when true, an entry with a kind not
       #   handled by `on(:kind)` is silently skipped instead of raising
       #   `UnhandledKind`. Default: false.
+      # @param view [String, Symbol, nil] for `mode: :matview` only — the name
+      #   of the host-owned materialized view. Required when mode is
+      #   `:matview`; ignored otherwise.
+      # @param refresh [Hash, nil] for `mode: :matview` only — refresh
+      #   metadata, e.g. `{ every: 5.minutes, concurrently: true }`. The
+      #   gem records this on the Definition for hosts to read when wiring
+      #   their scheduler; the gem does NOT auto-schedule.
       # @yield optional block-DSL form: register per-kind handlers via
-      #   `on(:kind) { |target, entry| ... }`.
+      #   `on(:kind) { |target, entry| ... }`. Not allowed for `mode: :matview`.
       # @return [Definition] the registered projection.
-      def projects_onto(target_association, mode:, via: nil, if: nil, lock: nil, permissive: false, **options, &block)
+      def projects_onto(target_association, mode:, via: nil, if: nil, lock: nil, permissive: false, view: nil, refresh: nil, **options, &block)
         guard = binding.local_variable_get(:if) # `if:` is a reserved keyword
 
         if mode == :sql
@@ -108,6 +118,40 @@ module StandardLedger
             lock: lock,
             permissive: permissive,
             recompute_sql: dsl.recompute_sql,
+            view: nil,
+            refresh_options: nil,
+            options: options
+          )
+
+          self.standard_ledger_projections = standard_ledger_projections + [ definition ]
+          install_mode_callbacks_for(definition)
+          return definition
+        end
+
+        if mode == :matview
+          if block
+            raise ArgumentError,
+                  "projects_onto :#{target_association} mode: :matview does not accept a block; " \
+                  "matview projections have no per-kind handlers — they refresh on a schedule"
+          end
+
+          if view.nil?
+            raise ArgumentError,
+                  "projects_onto :#{target_association} mode: :matview requires `view: \"name\"` " \
+                  "(the materialized view name to refresh)"
+          end
+
+          definition = Definition.new(
+            target_association: target_association,
+            mode: mode,
+            projector_class: nil,
+            handlers: {},
+            guard: guard,
+            lock: lock,
+            permissive: permissive,
+            recompute_sql: nil,
+            view: view.to_s,
+            refresh_options: refresh || {},
             options: options
           )
 
@@ -154,6 +198,8 @@ module StandardLedger
           lock: lock,
           permissive: permissive,
           recompute_sql: nil,
+          view: nil,
+          refresh_options: nil,
           options: options
         )
 
@@ -176,6 +222,8 @@ module StandardLedger
           StandardLedger::Modes::Inline.install!(self)
         when :sql
           StandardLedger::Modes::Sql.install!(self)
+        when :matview
+          StandardLedger::Modes::Matview.install!(self)
         end
       end
 

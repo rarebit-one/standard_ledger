@@ -132,6 +132,47 @@ SQL is the entire contract — `:sql` projections are naturally
 rebuildable: `StandardLedger.rebuild!` runs the same statement against
 every target the log references.
 
+Refresh a `:matview` projection ad-hoc when the host needs immediate
+read-your-write semantics (e.g. at the end of a draw operation, before
+the next scheduled refresh would otherwise show stale counts):
+
+```ruby
+class PromptTxn < ApplicationRecord
+  include StandardLedger::Entry
+  include StandardLedger::Projector
+
+  belongs_to :user_profile
+
+  ledger_entry kind: :event, idempotency_key: nil
+
+  projects_onto :user_profile,
+                mode:    :matview,
+                view:    "user_prompt_inventories",
+                refresh: { every: 5.minutes, concurrently: true }
+end
+
+# Schedule the recurring refresh from the host (SolidQueue Recurring
+# Tasks, sidekiq-cron, etc.) targeting:
+#   StandardLedger::MatviewRefreshJob
+#   args: ["user_prompt_inventories", { concurrently: true }]
+
+# Ad-hoc refresh after a critical write:
+StandardLedger.refresh!(:user_prompt_inventories)               # honors Config#matview_refresh_strategy
+StandardLedger.refresh!("user_prompt_inventories", concurrently: true)
+```
+
+`StandardLedger.rebuild!(PromptTxn)` is equivalent to refreshing every
+`:matview` projection on the entry class — for matview, refresh *is*
+rebuild. Postgres has no partial-refresh primitive, so `target:` /
+`target_class:` scope arguments are ignored for `:matview` projections
+and the full view is always refreshed.
+
+Note: the default `:concurrent` strategy (and `concurrently: true`) requires
+a unique index on the matview — Postgres rejects `REFRESH MATERIALIZED VIEW
+CONCURRENTLY` otherwise. Add a unique index in the host migration that
+creates the view, or set `Config#matview_refresh_strategy = :blocking` (or
+pass `concurrently: false` per-call) if a unique index isn't an option.
+
 Five projection modes — pick per declaration:
 
 | Mode | Where the work runs | Transactional? | Rebuildable? |
