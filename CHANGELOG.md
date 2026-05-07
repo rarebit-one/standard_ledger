@@ -6,7 +6,54 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+- New `:manual` projection mode. Records the projection contract
+  (target + projector class) without installing any callback —
+  intended for AASM/state-machine entries whose interesting lifecycle
+  event is a transition rather than `after_create`. Hosts invoke the
+  projector explicitly from operation code; the gem keeps the
+  contract introspectable (`standard_ledger_projections`) and
+  log-replayable via `StandardLedger.rebuild!`. Requires
+  `via: ProjectorClass`; rejects blocks, locks, and `permissive:`.
+- New `allow_destroy:` keyword on `ledger_entry`. When `true`, an
+  immutable entry permits `destroy` (including `dependent: :destroy`
+  cascades from a parent record) while still blocking `save`/`update`.
+  The default is `false` — preserves the strict journal contract.
+  Use this when an owning record's destroy cascade needs to reap
+  events for sandbox tear-down or GDPR erasure.
+- New `counters:` shortcut for `:inline` projections. A
+  `kind => column` Hash that synthesises one
+  `on(kind) { |t, _| t.class.increment_counter(col, t.id) }` per
+  entry. Direct UPDATE (the class-method form) is intentional — it
+  invalidates the SQL query cache for the target table, keeping
+  multiple sibling-entry creates inside a single transaction (e.g.
+  via `accepts_nested_attributes_for`) from losing updates against
+  stale cached reads. Block form remains available for non-counter
+  projections.
+- New `rebuild_sql:` keyword on `:trigger` mode. Equivalent to the
+  block-DSL `rebuild_sql "..."` clause, callable without a block.
+- Partial unique indexes are now accepted by the idempotency-index
+  validator when their predicate is the canonical
+  `<idempotency_key> IS NOT NULL` shape. Other predicates still raise
+  `MissingIdempotencyIndex` with a clearer error message.
+- New `StandardLedger::RefreshInsideTransaction` error. Raised when
+  `StandardLedger.refresh!(view, concurrently: true)` is called
+  inside an open transaction — Postgres rejects
+  `REFRESH MATERIALIZED VIEW CONCURRENTLY` inside transaction blocks,
+  and the gem now catches this at the boundary instead of letting
+  `PG::ActiveSqlTransaction` escape mid-call. The non-concurrent
+  form is still permitted by Postgres inside transactions and is
+  unaffected. No SQL is issued and no `.refreshed`/`.failed` event
+  fires when the guard rejects.
+- `docs/MIGRATION_GUIDE.md` covering the five real-world adoption
+  paths (counter caches, custom inline logic, bespoke jobs, existing
+  Postgres triggers, AASM state machines) and the cascade-delete /
+  refresh-in-transaction edge cases.
+
+### Documentation
+- `ledger_entry`'s YARD now notes that a single-symbol `scope:` is
+  normalised to a flat array on the stored config; assertions in
+  host specs should compare against `[:foo]`, not `:foo`.
 
 ## [0.3.0] - 2026-05-05
 

@@ -35,15 +35,29 @@ module StandardLedger
       #   guards against duplicate inserts. `nil` means the entry is not
       #   idempotent — explicitly opt-in to that.
       # @param scope [Symbol, Array<Symbol>, nil] additional columns the
-      #   idempotency index is scoped by (e.g. `:organisation_id`).
-      # @param immutable [Boolean] when true (default), `save`/`update`/
-      #   `destroy` raise after the row is persisted.
-      def ledger_entry(kind: :kind, idempotency_key: nil, scope: nil, immutable: true)
+      #   idempotency index is scoped by (e.g. `:organisation_id`). Always
+      #   normalised to a flat array on the stored config so downstream
+      #   reads don't need to handle both shapes — assertions in host specs
+      #   should compare against `[:foo]`, not `:foo`.
+      # @param immutable [Boolean] when true (default), `save`/`update`
+      #   raise after the row is persisted. Also blocks `destroy` unless
+      #   `allow_destroy: true` is set.
+      # @param allow_destroy [Boolean] when true, `destroy` (including
+      #   `dependent: :destroy` cascades from a parent record) is permitted
+      #   even on `immutable: true` entries. Use this when an owning record
+      #   declares `has_many :events, dependent: :destroy` and you want the
+      #   cascade to work for cleanup paths (sandbox tear-down, GDPR
+      #   erasure, etc.) while still blocking app-code mutations to
+      #   persisted entries. Defaults to `false` — keeping the strict
+      #   journal contract.
+      def ledger_entry(kind: :kind, idempotency_key: nil, scope: nil,
+                       immutable: true, allow_destroy: false)
         self.standard_ledger_entry_config = {
           kind: kind,
           idempotency_key: idempotency_key,
           scope: Array(scope).compact,
-          immutable: immutable
+          immutable: immutable,
+          allow_destroy: allow_destroy
         }
         self.standard_ledger_idempotency_index_validated = false
       end
@@ -97,20 +111,57 @@ module StandardLedger
         indexes  = connection.indexes(table_name)
 
         match = indexes.any? do |index|
-          index.unique && index.columns.map(&:to_s).to_set == required
+          next false unless index.unique
+          next false unless index.columns.map(&:to_s).to_set == required
+
+          # Full-table unique indexes are always valid. Partial indexes are
+          # accepted only when the predicate is the canonical
+          # `<idempotency_key> IS NOT NULL` shape — that's the common
+          # real-world pattern (e.g. an event table whose serial number is
+          # optional but unique-per-scope when present), and it preserves
+          # the gem's idempotency contract: rows with a non-null key are
+          # deduped; rows without one are explicitly opting out.
+          standard_ledger_index_predicate_acceptable?(index, config[:idempotency_key])
         end
 
         unless match
           raise StandardLedger::MissingIdempotencyIndex,
                 "#{name} declares idempotency_key: #{config[:idempotency_key].inspect} " \
                 "with scope: #{config[:scope].inspect} but no matching unique index " \
-                "covers exactly #{required.to_a.sort.inspect} on `#{table_name}`."
+                "covers exactly #{required.to_a.sort.inspect} on `#{table_name}`. " \
+                "If a matching partial index exists, its WHERE predicate must be " \
+                "`#{config[:idempotency_key]} IS NOT NULL` (other predicates aren't " \
+                "automatically validated — opt out of the check by setting " \
+                "idempotency_key: nil and enforcing uniqueness another way)."
         end
 
         self.standard_ledger_idempotency_index_validated = true
       end
 
       private
+
+      # Match a partial-index predicate of the form `<col> IS NOT NULL`
+      # (with optional whitespace and optional table/schema qualification
+      # on the column reference). Full-table indexes (no predicate) always
+      # qualify. This is conservative: predicates outside this shape can
+      # still be perfectly valid for the host's idempotency intent, but
+      # we'd need a real SQL parser to decide that — better to raise and
+      # let the host either restructure their index or opt out via
+      # `idempotency_key: nil`.
+      def standard_ledger_index_predicate_acceptable?(index, idempotency_key)
+        predicate = index.where
+        return true if predicate.nil? || predicate.to_s.strip.empty?
+
+        col = idempotency_key.to_s
+        # Postgres wraps the index predicate in parentheses when it returns
+        # it via pg_indexes (e.g. `(idempotency_key IS NOT NULL)`) — strip
+        # those along with the per-adapter quoting characters before
+        # matching. SQLite returns the raw expression, so the same strip is
+        # a no-op there. The regex tolerates whitespace around the column
+        # and operator and accepts an optional table-qualifier prefix.
+        normalised = predicate.to_s.gsub(/["`\[\]()]/, "").strip
+        normalised.match?(/\A([\w]+\.)?#{Regexp.escape(col)}\s+IS\s+NOT\s+NULL\z/i)
+      end
 
       def find_existing_standard_ledger_entry(attributes)
         return nil if attributes.nil?
@@ -165,9 +216,11 @@ module StandardLedger
       # plain Ruby classes that include Entry for testing the DSL surface
       # get the macro registration without the callback. AR's `readonly?`
       # path covers save/update on persisted rows; this catch-all stops
-      # `destroy` for the AR case.
+      # `destroy` for the AR case unless the entry opts out via
+      # `allow_destroy: true` (typically because an owning record's
+      # `dependent: :destroy` cascade needs to reap them on cleanup).
       if respond_to?(:before_destroy)
-        before_destroy :standard_ledger_raise_readonly, if: :standard_ledger_immutable?
+        before_destroy :standard_ledger_raise_readonly, if: :standard_ledger_destroy_blocked?
       end
 
       # Emit `<namespace>.entry.created` after the row is durably committed
@@ -187,14 +240,38 @@ module StandardLedger
       !!@_standard_ledger_idempotent
     end
 
-    # AR consults `readonly?` from `save`/`update` paths; raising
+    # AR consults `readonly?` from `save`/`update`/`destroy` paths; raising
     # ReadOnlyRecord here matches the ActiveRecord contract for persisted
     # immutable rows. New, unpersisted instances stay writable so the
     # initial INSERT can land.
+    #
+    # When `allow_destroy: true` is set, `#destroy` toggles
+    # `@_standard_ledger_destroying` so `readonly?` returns false for the
+    # duration of the destroy call (and the duration of any cascade
+    # destroys that fire from its `dependent: :destroy` associations).
+    # The save/update path is unaffected — those still raise on
+    # persisted rows.
     def readonly?
       return super unless standard_ledger_immutable?
+      return false if @_standard_ledger_destroying
 
       !new_record?
+    end
+
+    # Wrap `destroy` so it can bypass the `readonly?` guard when the
+    # entry has opted in via `allow_destroy: true`. This applies to
+    # `destroy`, `destroy!`, and `dependent: :destroy` cascades from a
+    # parent record (all routes call through `#destroy`).
+    def destroy
+      return super unless self.class.respond_to?(:standard_ledger_entry_config)
+
+      config = self.class.standard_ledger_entry_config
+      return super if config.nil? || !config[:immutable] || !config[:allow_destroy]
+
+      @_standard_ledger_destroying = true
+      super
+    ensure
+      @_standard_ledger_destroying = false
     end
 
     # Returns the entry's belongs_to targets keyed by association name.
@@ -230,6 +307,18 @@ module StandardLedger
     def standard_ledger_immutable?
       config = self.class.standard_ledger_entry_config
       !config.nil? && config[:immutable]
+    end
+
+    # Destroys are blocked when the entry is `immutable: true` AND the user
+    # has not opted out via `allow_destroy: true`. Split out so the
+    # before_destroy guard can be conditional independently of the
+    # save/update `readonly?` path.
+    def standard_ledger_destroy_blocked?
+      config = self.class.standard_ledger_entry_config
+      return false if config.nil?
+      return false unless config[:immutable]
+
+      !config[:allow_destroy]
     end
 
     def standard_ledger_raise_readonly

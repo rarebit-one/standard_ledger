@@ -321,6 +321,47 @@ RSpec.describe "StandardLedger.rebuild! (end-to-end)" do
     end
   end
 
+  describe "mode: :manual rebuild" do
+    # Manual mode installs no after_create callback, so counters drift
+    # silently as entries are written. `rebuild!` must still walk the log
+    # and call the projector class's `rebuild` to reconcile state — this
+    # is the whole reason `:manual` registers the contract on the entry.
+    it "calls the manual projector's rebuild method on each target" do
+      stub_const("ManualProjectedRecord", Class.new(ActiveRecord::Base) do
+        self.table_name = "voucher_records"
+        include StandardLedger::Entry
+        include StandardLedger::Projector
+
+        belongs_to :voucher_scheme
+
+        ledger_entry kind: :action, idempotency_key: :serial_no, scope: :organisation_id
+
+        projects_onto :voucher_scheme, mode: :manual, via: SchemeProjector
+      end)
+
+      # Insert directly to bypass projections (which manual mode doesn't
+      # install anyway) — counters stay at 0 in the database.
+      4.times do |i|
+        ManualProjectedRecord.create!(
+          organisation_id: "org-1",
+          action: %w[grant redeem consume clawback][i],
+          serial_no: "m-#{i}",
+          voucher_scheme: scheme
+        )
+      end
+      expect(scheme.reload.granted_vouchers_count).to eq(0)
+
+      result = StandardLedger.rebuild!(ManualProjectedRecord, target: scheme)
+
+      expect(result).to be_success
+      scheme.reload
+      expect(scheme.granted_vouchers_count).to eq(1)
+      expect(scheme.redeemed_vouchers_count).to eq(1)
+      expect(scheme.consumed_vouchers_count).to eq(1)
+      expect(scheme.clawed_back_vouchers_count).to eq(1)
+    end
+  end
+
   describe "result interop" do
     # The auto-cleanup hook in `standard_ledger/rspec` only clears the
     # thread-local `with_modes` map; it deliberately leaves Config alone so a

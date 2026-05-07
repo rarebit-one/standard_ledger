@@ -348,4 +348,217 @@ RSpec.describe StandardLedger::Projector do
       }.to raise_error(ArgumentError, /:inline.*ActiveRecord/m)
     end
   end
+
+  describe "counters: shortcut for :inline" do
+    # Sugar for the most common :inline shape — a kind => counter-column
+    # mapping. The gem synthesises `on(kind) { |t, _| t.class.increment_counter(col, t.id) }`
+    # per entry: direct UPDATE (the class-method form) so sibling-entry
+    # creates within one transaction don't lose updates against stale
+    # cached reads.
+    it "synthesises one increment_counter handler per kind" do
+      entry_class = fresh_entry_class
+      definition = entry_class.projects_onto :voucher_scheme,
+                                             mode: :inline,
+                                             counters: {
+                                               grant: :granted_count,
+                                               redeem: :redeemed_count
+                                             }
+
+      expect(definition.handlers.keys).to contain_exactly(:grant, :redeem)
+    end
+
+    it "rejects `counters:` with a non-:inline mode" do
+      entry_class = fresh_entry_class
+      expect {
+        entry_class.projects_onto :voucher_scheme,
+                                  mode: :async,
+                                  counters: { grant: :granted_count },
+                                  via: Class.new(StandardLedger::Projection)
+      }.to raise_error(ArgumentError, /counters:.*:inline-only/m)
+    end
+
+    it "rejects `counters:` together with a block" do
+      entry_class = fresh_entry_class
+      expect {
+        entry_class.projects_onto(:voucher_scheme,
+                                  mode: :inline,
+                                  counters: { grant: :granted_count }) { on(:grant) { } }
+      }.to raise_error(ArgumentError, /counters:.*block/m)
+    end
+
+    it "validates the counters hash shape" do
+      entry_class = fresh_entry_class
+      expect {
+        entry_class.projects_onto :voucher_scheme,
+                                  mode: :inline,
+                                  counters: { "grant" => :granted_count }
+      }.to raise_error(ArgumentError, /Symbol kind => Symbol column/)
+    end
+  end
+
+  describe "rebuild_sql: keyword for :trigger" do
+    it "accepts rebuild_sql as a keyword (no block needed)" do
+      entry_class = fresh_entry_class
+      definition = entry_class.projects_onto :voucher_scheme,
+                                             mode: :trigger,
+                                             trigger_name: "vr_after_insert_tr",
+                                             rebuild_sql: "UPDATE schemes SET c = 1 WHERE id = :target_id"
+
+      expect(definition.mode).to eq(:trigger)
+      expect(definition.trigger_name).to eq("vr_after_insert_tr")
+      expect(definition.recompute_sql).to include(":target_id")
+    end
+
+    it "rejects rebuild_sql: together with a block" do
+      entry_class = fresh_entry_class
+      expect {
+        entry_class.projects_onto(:voucher_scheme,
+                                  mode: :trigger,
+                                  trigger_name: "tr",
+                                  rebuild_sql: "UPDATE schemes SET c = 1 WHERE id = :target_id") do
+          rebuild_sql "UPDATE schemes SET c = 2 WHERE id = :target_id"
+        end
+      }.to raise_error(ArgumentError, /both `rebuild_sql:` and a block/)
+    end
+  end
+
+  describe "mode: :manual" do
+    let(:projector_class) do
+      Class.new(StandardLedger::Projection) do
+        def apply(target, entry)
+          target.granted += 1
+        end
+
+        def rebuild(target)
+          target.granted = 0
+        end
+      end
+    end
+
+    it "registers the definition without installing any after_create callback" do
+      entry_class = fresh_entry_class
+      expect(entry_class).not_to receive(:after_create)
+
+      definition = entry_class.projects_onto :voucher_scheme,
+                                             mode: :manual,
+                                             via: projector_class
+
+      expect(definition.mode).to eq(:manual)
+      expect(definition.projector_class).to eq(projector_class)
+      expect(entry_class.standard_ledger_projections_for(:manual)).to contain_exactly(definition)
+    end
+
+    it "lets host code dispatch the projector via apply_projection!" do
+      entry_class = fresh_entry_class
+      definition = entry_class.projects_onto :voucher_scheme, mode: :manual, via: projector_class
+
+      scheme = Struct.new(:granted).new(0)
+      entry  = entry_class.new(action: :grant, voucher_scheme: scheme)
+
+      expect(entry.apply_projection!(definition)).to be(true)
+      expect(scheme.granted).to eq(1)
+    end
+
+    it "rejects a block (manual mode has no per-kind handlers)" do
+      entry_class = fresh_entry_class
+      expect {
+        entry_class.projects_onto(:voucher_scheme, mode: :manual, via: projector_class) do
+          on(:grant) { |_, _| nil }
+        end
+      }.to raise_error(ArgumentError, /:manual does not accept a block/)
+    end
+
+    it "requires `via: ProjectorClass`" do
+      entry_class = fresh_entry_class
+      expect {
+        entry_class.projects_onto :voucher_scheme, mode: :manual
+      }.to raise_error(ArgumentError, /:manual requires `via: ProjectorClass`/)
+    end
+
+    it "rejects `lock:` (host owns the dispatch boundary)" do
+      entry_class = fresh_entry_class
+      expect {
+        entry_class.projects_onto :voucher_scheme,
+                                  mode: :manual,
+                                  via: projector_class,
+                                  lock: :pessimistic
+      }.to raise_error(ArgumentError, /lock:.*manual/m)
+    end
+
+    it "rejects `permissive: true` (no per-kind handlers to fall back from)" do
+      entry_class = fresh_entry_class
+      expect {
+        entry_class.projects_onto :voucher_scheme,
+                                  mode: :manual,
+                                  via: projector_class,
+                                  permissive: true
+      }.to raise_error(ArgumentError, /permissive:.*manual/m)
+    end
+
+    it "honours an `if:` guard when host code dispatches via apply_projection!" do
+      entry_class = fresh_entry_class
+      definition = entry_class.projects_onto :voucher_scheme,
+                                             mode: :manual,
+                                             via: projector_class,
+                                             if: -> { false }
+
+      scheme = Struct.new(:granted).new(0)
+      entry  = entry_class.new(action: :grant, voucher_scheme: scheme)
+
+      expect(entry.apply_projection!(definition)).to be(false)
+      expect(scheme.granted).to eq(0)
+    end
+  end
+
+  describe "counters: shortcut handler invocation" do
+    # Beyond the registration-shape tests above: the synthesised lambda must
+    # actually call increment_counter with the right column + id when the
+    # entry's after_create fires. Stub the AR-class side and verify the
+    # call shape end-to-end.
+    let(:scheme_class) do
+      Class.new do
+        def self.name = "FakeScheme"
+        def initialize(id) = (@id = id)
+        attr_reader :id
+
+        # Track increment_counter invocations on the class.
+        def self.calls = @calls ||= []
+        def self.increment_counter(col, id) = calls << [ col, id ]
+        def self.reset_calls = @calls = []
+      end
+    end
+
+    it "synthesises handlers that invoke `increment_counter` with (column, target.id)" do
+      entry_class = fresh_entry_class
+      definition = entry_class.projects_onto :voucher_scheme,
+                                             mode: :inline,
+                                             counters: {
+                                               grant:  :granted_count,
+                                               redeem: :redeemed_count
+                                             }
+
+      target = scheme_class.new(42)
+      scheme_class.reset_calls
+
+      entry = entry_class.new(action: :grant, voucher_scheme: target)
+      entry.apply_projection!(definition)
+
+      expect(scheme_class.calls).to eq([ [ :granted_count, 42 ] ])
+    end
+
+    it "captures a fresh column binding per synthesised handler (no loop-variable aliasing)" do
+      counters = { grant: :granted_count, redeem: :redeemed_count,
+                   consume: :consumed_count, clawback: :clawed_back_count }
+      entry_class = fresh_entry_class
+      definition = entry_class.projects_onto :voucher_scheme, mode: :inline, counters: counters
+
+      target = scheme_class.new(7)
+
+      counters.each do |kind, expected_column|
+        scheme_class.reset_calls
+        entry_class.new(action: kind, voucher_scheme: target).apply_projection!(definition)
+        expect(scheme_class.calls).to eq([ [ expected_column, 7 ] ])
+      end
+    end
+  end
 end
