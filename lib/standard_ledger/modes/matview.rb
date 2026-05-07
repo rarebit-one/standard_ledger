@@ -63,6 +63,7 @@ module StandardLedger
       #   the SQL — re-raised after the `failed` event fires.
       def self.refresh!(view_name, concurrently:)
         validate_view_name!(view_name)
+        check_transaction_state!(view_name, concurrently: concurrently)
 
         prefix = StandardLedger.config.notification_namespace
         sql = build_refresh_sql(view_name, concurrently: concurrently)
@@ -76,9 +77,10 @@ module StandardLedger
           view: view_name.to_s, concurrently: concurrently, duration_ms: duration_ms
         )
       rescue StandardError => e
-        # ArgumentError from the validator should propagate without firing
-        # the failed notification — the SQL was never issued.
-        raise if e.is_a?(ArgumentError)
+        # ArgumentError from the validator and RefreshInsideTransaction from
+        # the boundary check should propagate without firing the failed
+        # notification — the SQL was never issued.
+        raise if e.is_a?(ArgumentError) || e.is_a?(StandardLedger::RefreshInsideTransaction)
 
         StandardLedger::EventEmitter.emit(
           "#{prefix}.projection.failed",
@@ -95,12 +97,41 @@ module StandardLedger
       # injection isn't possible even when a host carelessly pipes a config
       # value into the call.
       def self.validate_view_name!(view_name)
-        return if view_name.to_s.match?(/\A[a-zA-Z_][a-zA-Z0-9_.]*\z/)
+        # Bare identifier OR exactly one schema-qualified `schema.view` part.
+        # The previous shape `\A[a-zA-Z_][a-zA-Z0-9_.]*\z` allowed trailing
+        # dots (`reporting.`) and unlimited qualification (`a.b.c.d`); both
+        # would round-trip to a Postgres syntax error at `connection.execute`
+        # time rather than the gem boundary.
+        return if view_name.to_s.match?(/\A[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)?\z/)
 
         raise ArgumentError,
               "view_name must be a valid SQL identifier; got #{view_name.inspect}"
       end
       private_class_method :validate_view_name!
+
+      # Reject `refresh!` calls issued from inside an open transaction when
+      # `concurrently: true`. Postgres rejects
+      # `REFRESH MATERIALIZED VIEW CONCURRENTLY` inside a transaction block
+      # (and would otherwise raise `PG::ActiveSqlTransaction` mid-call); we
+      # catch it at the gem boundary so the failure is attributable.
+      #
+      # The non-concurrent (`concurrently: false`) form *is* permitted inside
+      # a transaction by Postgres, so we only guard the concurrent path.
+      #
+      # Use `connection.add_transaction_record { … }` to defer to after-commit
+      # if you need read-your-write semantics from inside a transactional
+      # operation; otherwise, move the refresh outside the transaction.
+      def self.check_transaction_state!(view_name, concurrently:)
+        return unless concurrently
+        return unless ActiveRecord::Base.connection.transaction_open?
+
+        raise StandardLedger::RefreshInsideTransaction,
+              "StandardLedger.refresh!(#{view_name.inspect}) cannot run inside a transaction with " \
+              "concurrently: true — Postgres rejects `REFRESH MATERIALIZED VIEW CONCURRENTLY` inside " \
+              "transaction blocks. Move the call outside the transaction, or defer it via " \
+              "`connection.add_transaction_record { ... }` for after-commit execution."
+      end
+      private_class_method :check_transaction_state!
 
       def self.build_refresh_sql(view_name, concurrently:)
         if concurrently

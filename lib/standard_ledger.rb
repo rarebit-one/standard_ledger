@@ -443,6 +443,7 @@ module StandardLedger
     def validate_rebuildable_mode!(entry_class, definition)
       return if definition.mode == :inline
       return if definition.mode == :async
+      return if definition.mode == :manual
       return if definition.mode == :sql
       return if definition.mode == :matview
       return if definition.mode == :trigger

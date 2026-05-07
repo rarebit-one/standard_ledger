@@ -70,8 +70,119 @@ module StandardLedger
       # @yield optional block-DSL form: register per-kind handlers via
       #   `on(:kind) { |target, entry| ... }`. Not allowed for `mode: :matview`.
       # @return [Definition] the registered projection.
-      def projects_onto(target_association, mode:, via: nil, if: nil, lock: nil, permissive: false, view: nil, refresh: nil, trigger_name: nil, **options, &block)
+      def projects_onto(target_association, mode:, via: nil, if: nil, lock: nil, permissive: false,
+                        view: nil, refresh: nil, trigger_name: nil, counters: nil,
+                        rebuild_sql: nil, **options, &block)
         guard = binding.local_variable_get(:if) # `if:` is a reserved keyword
+
+        # `counters:` is sugar for the most common :inline shape — a hash
+        # mapping `kind => column` that synthesises one
+        # `on(kind) { |t, _| t.class.increment_counter(col, t.id) }` per
+        # entry. Direct UPDATE (the class-method form) is intentional: it
+        # invalidates the SQL query cache for the target table on each
+        # call, which keeps multiple sibling-entry creates in a single
+        # transaction (e.g. via `accepts_nested_attributes_for`) from
+        # losing updates against stale cached reads. Block form remains
+        # available for non-counter projections.
+        if counters
+          if mode != :inline
+            raise ArgumentError,
+                  "projects_onto :#{target_association} got `counters:` with mode: #{mode.inspect}; " \
+                  "the counters shortcut is :inline-only — counter caches don't fit the async/sql/" \
+                  "trigger/matview contracts"
+          end
+          if block || via
+            raise ArgumentError,
+                  "projects_onto :#{target_association} got `counters:` together with a block or `via:`; " \
+                  "the counters shortcut synthesises handlers automatically — use one form or the other"
+          end
+          unless counters.is_a?(Hash) && counters.all? { |k, v| k.is_a?(Symbol) && v.is_a?(Symbol) }
+            raise ArgumentError,
+                  "projects_onto :#{target_association} `counters:` must be a Hash of Symbol kind => Symbol column"
+          end
+
+          block = ->(*) {
+            counters.each do |kind, column|
+              on(kind) { |target, _| target.class.increment_counter(column, target.id) }
+            end
+          }
+        end
+
+        # `rebuild_sql:` keyword form for `:trigger` mode — equivalent to
+        # the legacy block-DSL `rebuild_sql "..."` clause but doesn't
+        # require a block. The block-DSL form is still supported.
+        if rebuild_sql && mode == :trigger
+          if block
+            raise ArgumentError,
+                  "projects_onto :#{target_association} got both `rebuild_sql:` and a block — " \
+                  "use one form or the other"
+          end
+          # Capture the parameter value into a local before building the
+          # block: when the synthesised block is `instance_eval`'d on
+          # `TriggerDsl`, the bare name `rebuild_sql` resolves to
+          # `TriggerDsl#rebuild_sql` (the writer), not the keyword
+          # parameter we want to pass in.
+          rebuild_sql_value = rebuild_sql
+          block = ->(*) { rebuild_sql(rebuild_sql_value) }
+        end
+
+        if mode == :manual
+          # `:manual` records the projection contract (target + projector
+          # class) without installing any callback. Use this when the
+          # entry's interesting lifecycle event is not the create itself
+          # — typically an AASM/state-machine model where the projection
+          # should fire on a transition (e.g. `validate_disbursement!`)
+          # rather than `after_create`. Hosts invoke the projector
+          # explicitly from operation code; the gem's role is to make
+          # the contract introspectable (via `standard_ledger_projections`)
+          # and to give `StandardLedger.rebuild!` a class handle for log
+          # replay.
+          if block
+            raise ArgumentError,
+                  "projects_onto :#{target_association} mode: :manual does not accept a block — " \
+                  "the entry's lifecycle is owned by the host, so per-kind handlers can't fire " \
+                  "automatically. Use `via: ProjectorClass` and invoke the projector explicitly " \
+                  "from the operation that drives the lifecycle event."
+          end
+
+          if via.nil?
+            raise ArgumentError,
+                  "projects_onto :#{target_association} mode: :manual requires `via: ProjectorClass` " \
+                  "whose `apply(target, entry)` is invoked explicitly by host code on the lifecycle " \
+                  "event the gem cannot observe (e.g. an AASM transition)."
+          end
+
+          unless lock.nil?
+            raise ArgumentError,
+                  "projects_onto :#{target_association} got `lock:` with mode: :manual; " \
+                  "the host owns the dispatch boundary and is responsible for any locking it needs."
+          end
+
+          if permissive
+            raise ArgumentError,
+                  "projects_onto :#{target_association} got `permissive: true` with mode: :manual; " \
+                  "`permissive:` is only meaningful with the block form."
+          end
+
+          definition = Definition.new(
+            target_association: target_association,
+            mode: mode,
+            projector_class: via,
+            handlers: {},
+            guard: guard,
+            lock: lock,
+            permissive: permissive,
+            recompute_sql: nil,
+            trigger_name: nil,
+            view: nil,
+            refresh_options: nil,
+            options: options
+          )
+
+          self.standard_ledger_projections = standard_ledger_projections + [ definition ]
+          # No `install_mode_callbacks_for` — the host owns the dispatch.
+          return definition
+        end
 
         if mode == :async
           if block

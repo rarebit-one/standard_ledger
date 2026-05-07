@@ -30,4 +30,14 @@ module StandardLedger
       super("Enqueued #{enqueued.size} projections; #{failed.size} failed to enqueue")
     end
   end
+
+  # Raised when `StandardLedger.refresh!(view, concurrently: true)` is called
+  # inside an open transaction. PostgreSQL rejects
+  # `REFRESH MATERIALIZED VIEW CONCURRENTLY` inside transaction blocks; the
+  # gem catches this at the boundary so the failure is a clear,
+  # gem-attributable error instead of a raw `PG::ActiveSqlTransaction`.
+  # Callers wanting read-your-write semantics inside an operation should
+  # wrap the call in `connection.add_transaction_record { ... }` to defer
+  # to after-commit, or move the refresh outside the transaction block.
+  class RefreshInsideTransaction < Error; end
 end

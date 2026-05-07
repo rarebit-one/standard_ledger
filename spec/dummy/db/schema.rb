@@ -97,6 +97,58 @@ ActiveRecord::Schema.define do
             unique: true,
             name: "index_extra_unique_entries_on_external_ref"
 
+  # Entry with a *partial* unique index — its WHERE predicate constrains
+  # uniqueness to rows where the idempotency key is non-null. The gem
+  # accepts this shape: rows with a present key are deduped, rows without
+  # one are opting out of idempotency. Used by the entry_spec partial-
+  # index test.
+  create_table :partial_index_entries, force: true do |t|
+    t.string :organisation_id, null: false
+    t.string :kind, null: false
+    t.string :idempotency_key  # nullable
+    t.timestamps
+  end
+
+  add_index :partial_index_entries,
+            %i[organisation_id idempotency_key],
+            unique: true,
+            where: "idempotency_key IS NOT NULL",
+            name: "index_partial_index_entries_partial"
+
+  # Entry with a partial unique index whose predicate is *not* the
+  # accepted `<col> IS NOT NULL` shape. The gem rejects this — the
+  # predicate could exclude rows we'd expect to be deduped, and matching
+  # arbitrary predicates would need a SQL parser.
+  create_table :weird_partial_entries, force: true do |t|
+    t.string :organisation_id, null: false
+    t.string :kind, null: false
+    t.string :idempotency_key, null: false
+    t.boolean :archived, null: false, default: false
+    t.timestamps
+  end
+
+  add_index :weird_partial_entries,
+            %i[organisation_id idempotency_key],
+            unique: true,
+            where: "archived = false",
+            name: "index_weird_partial_entries_only_active"
+
+  # Parent + child tables exercising `allow_destroy: true` under a real
+  # `dependent: :destroy` cascade, not just direct `entry.destroy!`. The
+  # entry_spec uses these to assert that destroying the parent reaps the
+  # children even when the entry is `immutable: true`.
+  create_table :cascade_parents, force: true do |t|
+    t.string :name
+    t.timestamps
+  end
+
+  create_table :cascade_child_entries, force: true do |t|
+    t.integer :cascade_parent_id, null: false
+    t.string  :kind, null: false
+    t.string  :payload
+    t.timestamps
+  end
+
   # ---------------------------------------------------------------------------
   # Tables exercised by spec/standard_ledger/inline_integration_spec.rb.
   #

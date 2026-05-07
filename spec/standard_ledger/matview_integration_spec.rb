@@ -235,6 +235,20 @@ RSpec.describe "StandardLedger matview mode (end-to-end)" do
         }.to raise_error(ArgumentError, /valid SQL identifier/)
       end
 
+      it "rejects a name with a trailing dot" do
+        # `reporting.` would round-trip to a Postgres syntax error at
+        # connection.execute — catch it at the gem boundary instead.
+        expect {
+          StandardLedger.refresh!("reporting.", concurrently: false)
+        }.to raise_error(ArgumentError, /valid SQL identifier/)
+      end
+
+      it "rejects a triple-qualified name (only schema.view is supported)" do
+        expect {
+          StandardLedger.refresh!("a.b.c", concurrently: false)
+        }.to raise_error(ArgumentError, /valid SQL identifier/)
+      end
+
       it "does not fire the failed notification when validation rejects the name" do
         events = []
         sub = ActiveSupport::Notifications.subscribe("standard_ledger.projection.failed") do |*args|
@@ -286,6 +300,46 @@ RSpec.describe "StandardLedger matview mode (end-to-end)" do
         expect(events.first[:error]).to be_a(StandardError)
       ensure
         ActiveSupport::Notifications.unsubscribe(sub) if sub
+      end
+    end
+
+    describe "transaction-state guard" do
+      # Postgres rejects `REFRESH MATERIALIZED VIEW CONCURRENTLY` inside a
+      # transaction block. The gem catches this at the boundary so callers
+      # see a clear, gem-attributable error instead of a raw
+      # `PG::ActiveSqlTransaction` from inside `connection.execute`.
+      #
+      # The non-concurrent form is permitted by Postgres inside transactions,
+      # so the guard is concurrent-only.
+      it "raises RefreshInsideTransaction when concurrently: true is called inside a transaction" do
+        ActiveRecord::Base.transaction do
+          expect {
+            StandardLedger.refresh!("user_prompt_inventories", concurrently: true)
+          }.to raise_error(StandardLedger::RefreshInsideTransaction, /cannot run inside a transaction/)
+        end
+      end
+
+      it "permits concurrently: false inside a transaction (Postgres allows the blocking form)" do
+        ActiveRecord::Base.transaction do
+          expect {
+            StandardLedger.refresh!("user_prompt_inventories", concurrently: false)
+          }.not_to raise_error
+        end
+      end
+
+      it "issues no SQL and emits no .refreshed/.failed event on the guard path" do
+        sub_refreshed = ActiveSupport::Notifications.subscribe("standard_ledger.projection.refreshed") { |*| flunk("must not fire") }
+        sub_failed    = ActiveSupport::Notifications.subscribe("standard_ledger.projection.failed")    { |*| flunk("must not fire") }
+        allow(ActiveRecord::Base.connection).to receive(:execute).and_call_original
+        ActiveRecord::Base.transaction do
+          expect {
+            StandardLedger.refresh!("user_prompt_inventories", concurrently: true)
+          }.to raise_error(StandardLedger::RefreshInsideTransaction)
+        end
+        expect(ActiveRecord::Base.connection).not_to have_received(:execute).with(/REFRESH MATERIALIZED VIEW/)
+      ensure
+        ActiveSupport::Notifications.unsubscribe(sub_refreshed) if sub_refreshed
+        ActiveSupport::Notifications.unsubscribe(sub_failed)    if sub_failed
       end
     end
   end
