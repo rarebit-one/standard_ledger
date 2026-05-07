@@ -6,6 +6,10 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.4.0] - 2026-05-07
+
 ### Added
 - New `:manual` projection mode. Records the projection contract
   (target + projector class) without installing any callback —
