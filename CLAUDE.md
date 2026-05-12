@@ -25,3 +25,14 @@ Then work inside `.worktrees/<name>/` for the rest of the session.
 **Why this matters:** Working directly on the main checkout causes cross-contamination between sessions — uncommitted changes, wrong branches, and dirty state leak into unrelated work. Worktrees eliminate this entirely.
 
 See the `/worktree` and `/start` skills for full conventions and flags.
+
+## Consumers
+
+`standard_ledger` is consumed via **git+tag references** in consumer Gemfiles (not via rubygems):
+
+- `fundbright-web`
+- `luminality-web`
+
+`nutripod-web` does not consume this gem.
+
+After tagging a new release, roll it out with the workspace-level `/rollout-gem standard_ledger [<version>]` skill (defined at the rarebit-one workspace root, one directory above this repo) — it edits the `tag:` value in each consumer's Gemfile and runs `bundle install`. The canonical consumer matrix lives in that skill's `SKILL.md`; the list here is a summary so tag pins don't drift between two files.
