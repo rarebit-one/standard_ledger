@@ -30,11 +30,9 @@ See the `/worktree` and `/start` skills for full conventions and flags.
 
 `standard_ledger` is consumed via **git+tag references** in consumer Gemfiles (not via rubygems):
 
-| App | Reference | Style |
-|---|---|---|
-| `fundbright-web` | `tag: "v0.4.0"` | `git:` + `tag:` |
-| `luminality-web` | `tag: "v0.4.0"` | `git:` + `tag:` |
+- `fundbright-web`
+- `luminality-web`
 
 `nutripod-web` does not consume this gem.
 
-After tagging a new release, roll it out with the workspace-level `/rollout-gem standard_ledger [<version>]` skill — rollout edits the `tag:` value in each consumer's Gemfile and runs `bundle install`. Keep this list in sync with the consumer matrix in `<workspace>/.claude/skills/rollout-gem/SKILL.md`.
+After tagging a new release, roll it out with the workspace-level `/rollout-gem standard_ledger [<version>]` skill (defined at the rarebit-one workspace root, one directory above this repo) — it edits the `tag:` value in each consumer's Gemfile and runs `bundle install`. The canonical consumer matrix lives in that skill's `SKILL.md`; the list here is a summary so tag pins don't drift between two files.
