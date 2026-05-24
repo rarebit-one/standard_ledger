@@ -33,7 +33,32 @@
       "Bash(ALLOW_MULTIPLE_COMMITS=1 gh pr create:*)",
       "Bash(ALLOW_MULTIPLE_COMMITS=1 git push:*)",
       "Bash(SKIP_PRE_PUSH_PREPARE=1 git push:*)",
-      "Bash(SKIP_SIGNED_COMMITS_HOOK=1 git commit:*)"
+      "Bash(SKIP_SIGNED_COMMITS_HOOK=1 git commit:*)",
+      "Bash(bundle:*)",
+      "Bash(gem build:*)",
+      "Bash(gem info:*)",
+      "Bash(gh api:*)",
+      "Bash(gh pr:*)",
+      "Bash(git add:*)",
+      "Bash(git branch:*)",
+      "Bash(git checkout:*)",
+      "Bash(git commit:*)",
+      "Bash(git diff:*)",
+      "Bash(git fetch:*)",
+      "Bash(git log:*)",
+      "Bash(git merge-base:*)",
+      "Bash(git pull:*)",
+      "Bash(git remote:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git stash:*)",
+      "Bash(git status:*)",
+      "Bash(git switch:*)",
+      "Bash(git tag:*)",
+      "Bash(git worktree:*)",
+      "Bash(rm *.gem)",
+      "Skill(publish-gem)",
+      "Skill(start)",
+      "Skill(worktree)"
     ]
   }
 }
