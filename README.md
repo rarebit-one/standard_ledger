@@ -382,4 +382,4 @@ Neither subsumes the other.
 
 ## License
 
-MIT. See [MIT-LICENSE](MIT-LICENSE).
+MIT. See [LICENSE](LICENSE).
