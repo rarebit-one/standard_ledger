@@ -84,7 +84,7 @@ RSpec.describe StandardLedger::Generators::InstallGenerator, type: :generator do
 
       output = run_generator
 
-      expect(output).to match(/already present, skipping/)
+      expect(output).to include('already present, skipping')
       expect(File.read(initializer_path)).to eq(sentinel)
     end
   end

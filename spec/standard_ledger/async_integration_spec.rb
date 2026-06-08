@@ -366,7 +366,7 @@ RSpec.describe "StandardLedger async mode (end-to-end)" do
         end
 
         expect(last_error).to be_a(RuntimeError)
-        expect(last_error.message).to match(/kaboom/)
+        expect(last_error.message).to include('kaboom')
 
         expect(failed_events).not_to be_empty
         expect(failed_events.first[:mode]).to eq(:async)
