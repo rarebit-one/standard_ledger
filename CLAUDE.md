@@ -15,7 +15,7 @@ git worktree add .worktrees/<name> -b <branch-name> "origin/$DEFAULT_BRANCH"
 
 Then work inside `.worktrees/<name>/` for the rest of the session.
 
-**Naming:** Use the Linear issue identifier if available (e.g., `.worktrees/<identifier>`), a task slug (e.g., `.worktrees/fix-auth-timeout`), or today's date (e.g., `.worktrees/2026-04-01`) as fallback.
+**Naming:** Use a task slug (e.g., `.worktrees/fix-auth-timeout`) or today's date (e.g., `.worktrees/2026-04-01`) as fallback.
 
 **The hook allows modifications only when:**
 
@@ -25,6 +25,12 @@ Then work inside `.worktrees/<name>/` for the rest of the session.
 **Why this matters:** Working directly on the main checkout causes cross-contamination between sessions — uncommitted changes, wrong branches, and dirty state leak into unrelated work. Worktrees eliminate this entirely.
 
 See the `/worktree` and `/start` skills for full conventions and flags.
+
+## Auto-loaded rules (`.claude/rules/`)
+
+- `ledger-entry-contract.md` — the immutability / append-only / idempotency
+  invariants of `StandardLedger::Entry` that must be preserved when editing
+  `lib/standard_ledger/**` or specs. Loads only when a matching file is touched.
 
 ## Consumers
 
