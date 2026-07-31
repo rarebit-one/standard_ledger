@@ -283,11 +283,15 @@ Five projection modes — pick per declaration:
 
 ## Installation
 
-The gem is private during incubation. Pin from git:
+The gem is published on RubyGems:
 
 ```ruby
-gem "standard_ledger", git: "https://github.com/rarebit-one/standard_ledger", ref: "<sha>"
+gem "standard_ledger", "~> 0.4"
 ```
+
+(It was git-pinned during incubation. Don't reintroduce a `git:` reference —
+it makes a bare `bundle install` a prerequisite for every other command in a
+fresh checkout, blocking `rubocop`/`rspec` until it has been run.)
 
 Then run the install generator to drop a configured initializer in place:
 
@@ -316,6 +320,57 @@ StandardLedger.configure do |c|
   }
 end
 ```
+
+## Events
+
+The gem emits five lifecycle events. On Rails 8.1+ they go through
+`Rails.event.notify(name, **payload)`; on older Rails (or any host without the
+structured reporter) they fall back to
+`ActiveSupport::Notifications.instrument(name, payload)`. The backend is
+detected per call, not cached at load — the gem is required before Rails has
+finished booting.
+
+Every name is prefixed with `Config#notification_namespace` (default
+`standard_ledger`), so a host that renames the namespace renames all five.
+
+| Event | Fired when | Payload |
+|---|---|---|
+| `<prefix>.entry.created` | after the entry's transaction commits | `entry:`, `kind:`, `targets:` (a `{ name => target }` hash) |
+| `<prefix>.projection.applied` | a projection wrote successfully | `entry:`, `target:`, `projection:`, `mode:`, `duration_ms:` — plus `attempt:` in `:async` mode |
+| `<prefix>.projection.failed` | a projection raised | the `applied` payload plus `error:` (the exception) |
+| `<prefix>.projection.refreshed` | a matview refresh succeeded | `view:`, `concurrently:`, `duration_ms:` |
+| `<prefix>.projection.rebuilt` | `StandardLedger.rebuild!` finished one target | `entry_class:`, `target:`, `projection:`, `mode:` |
+
+Four payload shapes are worth knowing before you write a subscriber that
+assumes a key is always present:
+
+- **`:sql` mode sends `target: nil`.** The recompute statement is bound by
+  `:target_id` and never loads the record, so there is no object to hand you.
+- **`:matview` events carry `view:`/`concurrently:` instead of
+  `entry:`/`target:`.** A refresh is view-wide — Postgres has no partial-refresh
+  primitive — so no single entry or target caused it. The matview variant of
+  `projection.failed` also carries `mode: :matview`, while
+  `projection.refreshed` carries no `mode:` at all.
+- **`projection.rebuilt` carries `entry_class:`, not `entry:`.** Rebuild is
+  log replay across an entire class; there is no originating entry.
+- **`projection.failed` is not fired for input errors.** An `ArgumentError`
+  from the matview name validator, or `RefreshInsideTransaction` from the
+  boundary check, propagates without an event — the SQL was never issued, so
+  nothing failed to project.
+
+**Subscriber exceptions are swallowed** (warned to stderr, not re-raised).
+Ledger observability must never take down a host's request path: by emit time
+the projection has already either succeeded or been rolled back, so there is
+nothing a raising subscriber could usefully abort. Don't put work in a
+subscriber that you need to have happened.
+
+Retries: `:async` projections are capped by `Config#default_async_retries`
+(default 3), and both `applied` and `failed` carry `attempt:` so subscribers
+can tell first-try success from retry success.
+
+`standard_audit` consumers can subscribe to `entry.created` to write an audit
+row; the gem itself never calls into audit. That coupling is deliberately the
+host's to opt into — see "Relationship to standard_audit" below.
 
 ## Testing
 

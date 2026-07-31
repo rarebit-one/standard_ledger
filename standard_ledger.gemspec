@@ -19,7 +19,10 @@ Gem::Specification.new do |spec|
     Dir["lib/**/*", "LICENSE", "Rakefile", "README.md", "CHANGELOG.md"]
   end
 
-  spec.required_ruby_version = ">= 3.4"
+  # Matches the rest of the standard_* family, and — more to the point — matches
+  # what is actually exercised: CI has only ever run the 4.0.x matrix, so the
+  # old ">= 3.4" was an untested claim. Every consumer runs 4.0.x too.
+  spec.required_ruby_version = ">= 4.0"
 
   spec.add_dependency "railties", ">= 8.0"
   spec.add_dependency "activerecord", ">= 8.0"
