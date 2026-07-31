@@ -34,11 +34,17 @@ See the `/worktree` and `/start` skills for full conventions and flags.
 
 ## Consumers
 
-`standard_ledger` is consumed via **git+tag references** in consumer Gemfiles (not via rubygems):
+`standard_ledger` is consumed by these apps in the rarebit-one workspace:
 
 - `fundbright-web`
 - `luminality-web`
+- `sidekick-web`
+- `jumpdrive-web` (the control-plane app, formerly `workspace-os`; its `Gemfile`/`Gemfile.lock` live under `control-plane/`, **not** the repo root — a `*/Gemfile` glob misses it. Its local checkout is `~/Workspace/rarebit-one/jumpdrive-web`.)
 
-`nutripod-web` does not consume this gem.
+`nutripod-web` does **not** consume this gem — it is the one app in the estate that doesn't.
 
-After tagging a new release, roll it out with the workspace-level `/rollout-gem standard_ledger [<version>]` skill (defined at the rarebit-one workspace root, one directory above this repo) — it edits the `tag:` value in each consumer's Gemfile and runs `bundle install`. The canonical consumer matrix lives in that skill's `SKILL.md`; the list here is a summary so tag pins don't drift between two files.
+Three consumers live in sibling workspaces — `fundbright-web` in `~/Workspace/fundbright/`, `luminality-web` in `~/Workspace/luminalityai/`, `sidekick-web` in `~/Workspace/sidekick-labs/`.
+
+**Consumption is plain rubygems (`gem "standard_ledger", "~> X.Y"`), not git+tag.** This section claimed git+tag until 2026-07-31; that was legacy and is now wrong in every consumer. The gem has been published on RubyGems since 2026-05-07, and the last two git pins were converted in `luminalityai/luminality-web#984` and `rarebit-one/jumpdrive-web#456`. **Don't reintroduce a `git:` reference** — it makes a bare `bundle install` a prerequisite for every other command in a fresh devcontainer (`Bundler::GitError: ... is not yet checked out`), blocking `rubocop`/`rspec`/`srb tc` until it is run.
+
+After publishing a new version via `/publish-gem`, roll it out with the workspace-level `/rollout-gem standard_ledger [<version>]` skill (defined at the rarebit-one workspace root, one directory above this repo). The canonical consumer matrix — including version constraints — lives in that skill's `SKILL.md`; the list here is a summary of it, kept in the bulleted form that `.claude/scripts/check-gem-family-drift.sh` compares against the matrix.

@@ -6,7 +6,28 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+- `required_ruby_version` raised from `>= 3.4` to `>= 4.0`, and the repo's
+  `.ruby-version` moved from 3.4.4 to 4.0.1 to match. The 3.4 floor was never
+  exercised — CI has only ever run the 4.0.x matrix — and every consumer runs
+  4.0.x. This aligns the gem with the rest of the `standard_*` family.
+
+### Documentation
+- New README **Events** section documenting all five lifecycle events
+  (`entry.created`, `projection.applied`, `projection.failed`,
+  `projection.refreshed`, `projection.rebuilt`), their payloads, and the four
+  places a payload shape differs from the obvious one: `:sql` mode sends
+  `target: nil`, `:matview` events carry `view:`/`concurrently:` instead of
+  `entry:`/`target:`, `projection.rebuilt` carries `entry_class:` rather than
+  `entry:`, and input errors (matview name validation,
+  `RefreshInsideTransaction`) propagate without firing `projection.failed`.
+  Also records that subscriber exceptions are swallowed by design.
+- README installation now shows the RubyGems pin. It still said "private during
+  incubation, pin from git"; the gem has been on RubyGems since 2026-05-07 and
+  the last git-pinned consumer was converted in 2026-07.
+- `CLAUDE.md` consumer list corrected: it listed two consumers and claimed
+  git+tag consumption. There are four (`fundbright-web`, `luminality-web`,
+  `sidekick-web`, `jumpdrive-web`), all plain rubygems.
 
 ## [0.4.0] - 2026-05-07
 
