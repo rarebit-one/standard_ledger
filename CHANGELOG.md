@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-22
+
 ### Changed
 - `required_ruby_version` raised from `>= 3.4` to `>= 4.0`, and the repo's
   `.ruby-version` moved from 3.4.4 to 4.0.1 to match. The 3.4 floor was never
@@ -444,7 +446,9 @@ roadmap.
   and `:trigger` (host-owned, gem records rebuild SQL).
 - `standard_ledger:doctor` rake task (verifies trigger presence, etc.).
 
-[Unreleased]: https://github.com/rarebit-one/standard_ledger/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/rarebit-one/standard_ledger/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/rarebit-one/standard_ledger/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/rarebit-one/standard_ledger/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/rarebit-one/standard_ledger/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rarebit-one/standard_ledger/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rarebit-one/standard_ledger/releases/tag/v0.1.0
