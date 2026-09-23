@@ -207,5 +207,83 @@ RSpec.describe "post_ledger_entry matcher" do
       expect(message).to include("standard_ledger.entry.created")
     end
   end
+
+  # On Rails 8.1+ `EventEmitter` emits through `Rails.event.notify`, not
+  # AS::Notifications. Install a real `ActiveSupport::EventReporter` as
+  # `Rails.event` so the matcher is exercised against the channel production
+  # hosts actually use.
+  describe "when Rails.event is the live bus (Rails 8.1+)" do
+    let(:reporter) { ActiveSupport::EventReporter.new(raise_on_error: true) }
+
+    before do
+      require "active_support/event_reporter"
+      bus = reporter
+      rails = Module.new
+      rails.define_singleton_method(:event) { bus }
+      stub_const("Rails", rails)
+    end
+
+    it "routes emission through Rails.event, not AS::Notifications" do
+      notified = []
+      sub = ActiveSupport::Notifications.subscribe("standard_ledger.entry.created") { |*args| notified << args }
+
+      expect(StandardLedger::EventEmitter.rails_event_available?).to be(true)
+      expect { post_grant }.to post_ledger_entry(VoucherRecord)
+      expect(notified).to be_empty
+    ensure
+      ActiveSupport::Notifications.unsubscribe(sub) if sub
+    end
+
+    it "passes when the block posts an entry of the expected class" do
+      expect { post_grant }.to post_ledger_entry(VoucherRecord)
+    end
+
+    it "matches .with(kind:, targets:, attrs:)" do
+      expect {
+        post_grant(attrs: { serial_no: "v-re-1" })
+      }.to post_ledger_entry(VoucherRecord).with(
+        kind:    :grant,
+        targets: { voucher_scheme: scheme, customer_profile: profile },
+        attrs:   { serial_no: "v-re-1" }
+      )
+    end
+
+    it "fails .with when the kind differs" do
+      expect {
+        expect { post_grant(kind: "redeem") }.to post_ledger_entry(VoucherRecord).with(kind: :grant)
+      }.to raise_error(RSpec::Expectations::ExpectationNotMetError, /kind: :grant/)
+    end
+
+    it "fails when no entry is posted" do
+      expect {
+        expect { :no_op }.to post_ledger_entry(VoucherRecord)
+      }.to raise_error(RSpec::Expectations::ExpectationNotMetError, /no.*events fired/)
+    end
+
+    it "fails a negated expectation when a matching entry was posted" do
+      expect {
+        expect { post_grant }.not_to post_ledger_entry(VoucherRecord)
+      }.to raise_error(RSpec::Expectations::ExpectationNotMetError, /1 matching event/)
+    end
+
+    it "passes a negated expectation when a different class was posted" do
+      expect { post_grant(OtherRecord) }.not_to post_ledger_entry(VoucherRecord)
+    end
+
+    it "ignores other Rails.event events fired in the block" do
+      expect {
+        expect { reporter.notify("standard_ledger.projection.applied", entry: nil) }.to post_ledger_entry(VoucherRecord)
+      }.to raise_error(RSpec::Expectations::ExpectationNotMetError, /no.*events fired/)
+    end
+
+    it "unsubscribes its collector after the block, even when the block raises" do
+      expect { post_grant }.to post_ledger_entry(VoucherRecord)
+      expect {
+        expect { raise "boom" }.to post_ledger_entry(VoucherRecord)
+      }.to raise_error("boom")
+
+      expect(reporter.subscribers).to be_empty
+    end
+  end
 end
 # rubocop:enable RSpec/DescribeClass, RSpec/ExampleLength, RSpec/MultipleExpectations
