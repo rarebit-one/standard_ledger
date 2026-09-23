@@ -141,8 +141,8 @@ Specs are colocated by topic (`spec/standard_ledger/<topic>_spec.rb`). End-to-en
 
 Host apps opt into the gem's RSpec support by adding `require "standard_ledger/rspec"` to their `spec/rails_helper.rb`. Loading that file:
 
-- Registers a `before(:each)` hook that calls `StandardLedger.reset!`, which clears `StandardLedger.config` and the thread-local `with_modes` override map between examples.
-- Defines the `post_ledger_entry(EntryClass).with(kind:, targets:, attrs:)` block matcher — subscribes to `<namespace>.entry.created`, captures every event fired during the block, and asserts (or refutes, when negated) that a matching event was emitted.
+- Registers a `before(:each)` hook that calls `StandardLedger.reset_mode_overrides!`, which clears the thread-local `with_modes` override map between examples. It deliberately does not call `reset!`, so host initializer configuration survives.
+- Defines the `post_ledger_entry(EntryClass).with(kind:, targets:, attrs:)` block matcher — subscribes to `<namespace>.entry.created` on whichever channel `EventEmitter` selects (`Rails.event` on Rails 8.1+, `ActiveSupport::Notifications` otherwise), captures every event fired during the block, and asserts (or refutes, when negated) that a matching event was emitted.
 - Auto-includes `StandardLedger::RSpec::Helpers` into every example group, exposing `with_modes(...)` as sugar over `StandardLedger.with_modes`.
 
 `StandardLedger.with_modes(EntryClass => :inline) { ... }` writes its overrides into a thread-local hash; mode strategies will consult `StandardLedger.mode_override_for(entry_class)` once `Modes::Async` ships. Today (only `:inline` exists) it's effectively a no-op for already-inline projections — the API lands now so async-mode specs can opt into the inline path the moment the strategy ships.

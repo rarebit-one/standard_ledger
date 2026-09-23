@@ -1,5 +1,28 @@
 require "rspec/expectations"
 require "active_support/notifications"
+require "standard_ledger/event_emitter"
+
+module StandardLedger
+  module RSpec
+    # Collects `<namespace>.entry.created` payloads from `Rails.event` for the
+    # duration of a `post_ledger_entry` block. A dedicated object (not a
+    # Proc) because `EventReporter#unsubscribe` matches with `===`.
+    #
+    # @api private
+    class RailsEventCollector
+      attr_reader :payloads
+
+      def initialize(event_name)
+        @event_name = event_name
+        @payloads = []
+      end
+
+      def emit(event)
+        @payloads << event[:payload] if event[:name] == @event_name
+      end
+    end
+  end
+end
 
 # `post_ledger_entry` — assert that a block of code wrote a ledger entry.
 #
@@ -22,7 +45,9 @@ require "active_support/notifications"
 #   expect { ... }.to_not post_ledger_entry(VoucherRecord)
 #
 # The matcher subscribes to `<namespace>.entry.created` for the duration of
-# the block, captures every fired event, and asserts that at least one event
+# the block, on whichever channel `StandardLedger::EventEmitter` emits through
+# (`Rails.event` on Rails 8.1+, `ActiveSupport::Notifications` otherwise),
+# captures every fired event, and asserts that at least one event
 # matched the expected class (and, when chained, the expected `kind`,
 # `targets`, and `attrs`). The notification namespace is read from
 # `StandardLedger.config.notification_namespace`, so a host that customised
@@ -71,10 +96,35 @@ RSpec::Matchers.define :post_ledger_entry do |entry_class|
   # Helpers
   # ----------------------------------------------------------------------
 
+  # Listens on the same channel `EventEmitter.emit` picks. Listening only on
+  # AS::Notifications meant that on Rails 8.1 (where emit goes through
+  # `Rails.event`) the matcher saw nothing — every positive expectation
+  # failed and every negated one passed vacuously.
   def capture_entry_created_events(&block)
+    if StandardLedger::EventEmitter.rails_event_available?
+      capture_via_rails_event(&block)
+    else
+      capture_via_notifications(&block)
+    end
+  end
+
+  def capture_via_rails_event(&block)
+    bus = ::Rails.event
+    collector = StandardLedger::RSpec::RailsEventCollector.new(notification_event_name)
+    bus.subscribe(collector)
+
+    begin
+      block.call
+    ensure
+      bus.unsubscribe(collector)
+    end
+
+    collector.payloads
+  end
+
+  def capture_via_notifications(&block)
     events = []
-    name = notification_event_name
-    subscriber = ActiveSupport::Notifications.subscribe(name) do |*args|
+    subscriber = ActiveSupport::Notifications.subscribe(notification_event_name) do |*args|
       events << ActiveSupport::Notifications::Event.new(*args).payload
     end
 
