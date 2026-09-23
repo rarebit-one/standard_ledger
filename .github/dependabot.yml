@@ -5,7 +5,10 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 10
+    # Paused 2026-09-24: Dependabot's bundler updater supports Ruby <= 3.4.8, but
+    # this gem requires Ruby >= 4.0, so bundler version updates fail with
+    # tool_version_not_supported. Restore to 10 once Dependabot supports Ruby 4.0.
+    open-pull-requests-limit: 0
     groups:
       development-dependencies:
         dependency-type: "development"
