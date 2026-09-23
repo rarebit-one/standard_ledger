@@ -381,12 +381,15 @@ The gem ships an opt-in RSpec support file. Hosts add this to their
 require "standard_ledger/rspec"
 ```
 
-That registers a `before(:each)` hook that calls `StandardLedger.reset!`
-between examples (so per-spec configuration doesn't leak), and exposes:
+That registers a `before(:each)` hook that calls
+`StandardLedger.reset_mode_overrides!` between examples (so `with_modes`
+overrides don't leak). It deliberately does not call the full `reset!`, which
+would wipe configuration your initializers set up. It also exposes:
 
 - `post_ledger_entry(EntryClass).with(...)` — a block matcher that
-  subscribes to the `<namespace>.entry.created` notification for the
-  duration of the block and asserts an entry of the expected class was
+  subscribes to the `<namespace>.entry.created` event for the duration of
+  the block, on the same channel the gem emits through (`Rails.event` on
+  Rails 8.1+, `ActiveSupport::Notifications` otherwise), and asserts an entry of the expected class was
   written (with optional `kind:`/`targets:`/`attrs:` constraints).
 
   ```ruby

@@ -12,8 +12,10 @@ module StandardLedger
 
     initializer "standard_ledger.notifications", after: :load_config_initializers do
       # Notification wiring lands here in a follow-up PR. Today this is a
-      # no-op — the gem emits events but ships no internal subscribers; hosts
-      # subscribe directly via ActiveSupport::Notifications.subscribe.
+      # no-op — the gem emits events but ships no internal subscribers. On
+      # Rails 8.1+ events go through `Rails.event.notify`, so hosts subscribe
+      # with `Rails.event.subscribe`; on older Rails they fall back to
+      # ActiveSupport::Notifications (see StandardLedger::EventEmitter).
     end
 
     # Engines auto-discover `lib/tasks/*.rake` in most Rails versions, but
