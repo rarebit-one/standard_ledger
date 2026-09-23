@@ -6,6 +6,26 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-24
+
+### Fixed
+- The `post_ledger_entry` RSpec matcher now listens on the channel
+  `StandardLedger::EventEmitter` emits through. It only subscribed to
+  `ActiveSupport::Notifications`, but on Rails 8.1+ the gem emits through
+  `Rails.event.notify`, so the matcher saw no events at all: every positive
+  expectation failed and every `not_to post_ledger_entry` passed without
+  checking anything. When `EventEmitter.rails_event_available?` is true, the
+  matcher now subscribes a collector to `Rails.event` for the block and
+  unsubscribes it afterwards.
+
+### Documentation
+- README **Testing** section (and `AGENTS.md`) said the RSpec support hook
+  calls `StandardLedger.reset!`. It calls `reset_mode_overrides!`, which keeps
+  host initializer configuration intact.
+- The engine initializer comment now tells hosts to subscribe via
+  `Rails.event.subscribe` on Rails 8.1+ rather than
+  `ActiveSupport::Notifications.subscribe`.
+
 ## [0.5.0] - 2026-09-22
 
 ### Changed
@@ -446,7 +466,8 @@ roadmap.
   and `:trigger` (host-owned, gem records rebuild SQL).
 - `standard_ledger:doctor` rake task (verifies trigger presence, etc.).
 
-[Unreleased]: https://github.com/rarebit-one/standard_ledger/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/rarebit-one/standard_ledger/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/rarebit-one/standard_ledger/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/rarebit-one/standard_ledger/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/rarebit-one/standard_ledger/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/rarebit-one/standard_ledger/compare/v0.2.0...v0.3.0
