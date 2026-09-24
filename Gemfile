@@ -11,5 +11,5 @@ end
 
 group :test do
   gem "sqlite3", require: false
-  gem "activerecord", ">= 8.0", require: false
+  gem "activerecord", ">= 8.1", require: false
 end

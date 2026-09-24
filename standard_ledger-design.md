@@ -203,7 +203,7 @@ lib/
 There is no Rails engine: the gem has no routes, tables, jobs or rake tasks.
 Rails finds the generator on the load path. Runtime dependencies are
 `activerecord`, `activesupport` and `railties` (for the generator), all
-`>= 8.0`. Ruby `>= 4.0`.
+`>= 8.1`. Ruby `>= 4.0`.
 
 ## 7. Testing
 
