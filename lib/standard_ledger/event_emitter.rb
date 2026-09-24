@@ -15,8 +15,8 @@ module StandardLedger
 
     # Emit a single event. Both backends are best-effort: any exception raised
     # by a subscriber is swallowed so ledger observability never takes down a
-    # host's request path (the projection has already either succeeded or
-    # been rolled back by the time we emit).
+    # host's request path (the entry is already committed, or the refresh
+    # already ran, by the time we emit).
     def emit(event_name, payload)
       if (bus = rails_event_bus)
         bus.notify(event_name, **payload)

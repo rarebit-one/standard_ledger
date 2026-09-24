@@ -8,9 +8,9 @@ paths:
 
 `StandardLedger::Entry` marks an ActiveRecord model as an **immutable,
 append-only** journal row. The whole point of this gem is that a persisted
-entry is a permanent fact. When editing `entry.rb`, the modes, or projection
-code, preserve these invariants — a change that quietly relaxes them is a
-correctness regression, not a refactor.
+entry is a permanent fact. When editing `entry.rb` or `post`, preserve
+these invariants — a change that quietly relaxes them is a correctness
+regression, not a refactor.
 
 ## Immutability (default `immutable: true`)
 
@@ -39,8 +39,10 @@ correctness regression, not a refactor.
   (`Array(scope).compact`). Host specs compare against `[:foo]`, not `:foo` —
   keep the normalisation so downstream reads don't have to handle both shapes.
 
-## Decoupling
+## Scope
 
-Immutability (`Entry`) and projection registration (`Projector`) are **separate
-concerns** — an entry can be immutable without projecting, and vice versa. Don't
-re-couple them.
+The declarative projection engine (`Projector`, the projection modes,
+`rebuild!`) was removed in 0.6.0 because no consumer used it. Deriving
+aggregates is the host's job (a `StandardLedger::Projection` subclass it calls
+itself, or a materialized view refreshed via `StandardLedger.refresh!`). Don't
+reintroduce entry-driven projection callbacks into `Entry`.

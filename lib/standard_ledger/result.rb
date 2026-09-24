@@ -1,6 +1,6 @@
 module StandardLedger
   # The gem's default result type, returned by `StandardLedger.post` and
-  # `StandardLedger.rebuild!` when the host has not configured an adapter
+  # `StandardLedger.refresh!` when the host has not configured an adapter
   # for its own Result class.
   #
   # Hosts with their own Result type (e.g. `ApplicationOperation::Result`)
@@ -16,7 +16,7 @@ module StandardLedger
     # @param entry [ActiveRecord::Base, nil] the persisted entry record.
     # @param idempotent [Boolean] true when the create was a no-op because an
     #   existing row already satisfied the idempotency key.
-    # @param projections [Hash] split by mode: `{ inline: [...], async: [...], matview: [...] }`.
+    # @param projections [Hash] `{}` for `post`; `{ refreshed: [{ view:, concurrently: }] }` for `refresh!`.
     def initialize(success:, value: nil, errors: [], entry: nil, idempotent: false, projections: {})
       @success = success
       @value = value

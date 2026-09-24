@@ -2,16 +2,16 @@ require "active_support/concern"
 
 module StandardLedger
   # Marks an ActiveRecord model as a ledger entry: an immutable, append-only
-  # row that may project onto one or more aggregate targets.
+  # journal row.
   #
   # Including this concern installs:
   #   - the `ledger_entry` class macro (declares immutability + idempotency)
   #   - read-only behavior post-creation (when `immutable: true`, the default)
   #   - idempotency-by-unique-index (when `idempotency_key:` is non-nil)
   #
-  # Projection registration happens via the separate `Projector` concern —
-  # the two are decoupled so that an entry can be marked immutable without
-  # also opting into projections, and vice versa.
+  # Aggregates derived from entries are the host's concern — a plain
+  # `StandardLedger::Projection` subclass or a materialized view refreshed via
+  # `StandardLedger.refresh!`.
   #
   # @example
   #   class VoucherRecord < ApplicationRecord
@@ -26,8 +26,7 @@ module StandardLedger
 
     class_methods do
       # Declare the entry's contract. Stores the configuration on the class
-      # for later inspection by `StandardLedger.post`, `Projection.rebuild!`,
-      # and the `standard_ledger:doctor` rake task.
+      # for later inspection by `StandardLedger.post` and host specs.
       #
       # @param kind [Symbol] the column holding the entry's kind/action
       #   discriminator. Defaults to `:kind`.
@@ -285,10 +284,7 @@ module StandardLedger
     # typical 1–2 belongs_to entry, that's negligible. If profiling on a
     # high-cardinality entry shows this matters, capture targets earlier
     # (e.g. in `before_create`) and stash them on the instance — deferred
-    # to a future PR. Notably, an inline-mode caller has already resolved
-    # these targets by the time `after_commit` runs, so the SELECTs would
-    # only happen for entries with belongs_to associations that are *not*
-    # registered as projection targets.
+    # to a future PR.
     #
     # @return [Hash{Symbol => ActiveRecord::Base}]
     def standard_ledger_targets

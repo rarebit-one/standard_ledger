@@ -1,39 +1,32 @@
 module StandardLedger
-  # Base class for projector classes registered via
-  # `projects_onto :target, via: ProjectorClass`. Subclasses implement
-  # `apply` (and optionally `rebuild`) to mutate the target based on a new
-  # entry.
-  #
-  # For projections expressible as block DSL (counter increments, simple
-  # delta updates), prefer the block form on `Projector#projects_onto`
-  # instead — extracting a class is for non-trivial projectors.
+  # Optional base class for host-side projector objects: plain Ruby classes
+  # that update an aggregate from ledger entries. The gem does not invoke
+  # projectors itself (the declarative `projects_onto` engine was removed in
+  # 0.6.0) — the host calls `apply` / `rebuild` from its own operations.
+  # Subclassing gives a shared shape and sensible failures for unimplemented
+  # methods.
   #
   # @example
-  #   class Orders::FulfillableProjector < StandardLedger::Projection
-  #     # Called inside the async job, with target locked.
-  #     def apply(order, _entry)
-  #       order.update!(
-  #         fulfillable_balance: order.fulfillment_records.group(:key).sum(:amount),
-  #         fulfillable_status:  order.fulfillment_records.group(:key).sum(:amount).values.all?(&:zero?) ? :fulfilled : :pending
-  #       )
+  #   class Validations::ProfileProjector < StandardLedger::Projection
+  #     def apply(profile, validation)
+  #       profile.increment!(:successful_loans_count) if validation.successful?
   #     end
   #
-  #     # Called by Projection.rebuild! to recompute from the full log.
-  #     def rebuild(order)
-  #       apply(order, nil)
+  #     def rebuild(profile)
+  #       profile.update!(successful_loans_count: profile.validations.successful.count)
   #     end
   #   end
+  #
+  #   Validations::ProfileProjector.new.apply(profile, validation)
   class Projection
-    # Apply a single entry's effect to the target. Called inside the
-    # transactional or async boundary of the chosen mode.
+    # Apply a single entry's effect to the target.
     def apply(_target, _entry)
       raise NotImplementedError, "#{self.class}#apply must be implemented"
     end
 
-    # Recompute the target's projection from the full entry log. Called by
-    # `StandardLedger.rebuild!`. Projectors that cannot be rebuilt (e.g.
-    # delta-only `increment_counter` flavored ones) should raise
-    # `StandardLedger::NotRebuildable`.
+    # Recompute the target from the full entry log. Projectors that cannot
+    # be rebuilt (e.g. delta-only ones) leave this unimplemented and it
+    # raises `StandardLedger::NotRebuildable`.
     def rebuild(_target)
       raise NotRebuildable, "#{self.class}#rebuild not implemented; this projector cannot be rebuilt from the entry log"
     end

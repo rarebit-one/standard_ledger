@@ -3,10 +3,14 @@ RSpec.describe StandardLedger::Config do
 
   describe "defaults" do
     it "has the documented default values" do
-      expect(config.default_async_retries).to eq(3)
-      expect(config.scheduler).to eq(:solid_queue)
       expect(config.matview_refresh_strategy).to eq(:concurrent)
       expect(config.notification_namespace).to eq("standard_ledger")
+    end
+
+    it "no longer exposes the removed projection-engine settings" do
+      %i[default_async_job default_async_retries scheduler].each do |setting|
+        expect(config).not_to respond_to(setting)
+      end
     end
 
     it "leaves result interop unset by default" do
