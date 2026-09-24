@@ -1,422 +1,212 @@
 # standard_ledger
 
-Immutable journal entries with declarative aggregate projections for Rails apps.
+Immutable, append-only journal entries for Rails apps, with a `post` helper
+and a materialized-view refresh wrapper.
 
-> **Status: v0.3.0** — feature-complete across all five projection modes
-> (`:inline`, `:async`, `:sql`, `:matview`, `:trigger`) plus
-> `StandardLedger.rebuild!` log-replay, `StandardLedger.refresh!` ad-hoc
-> matview refresh, and the `standard_ledger:doctor` rake task. Ready for
-> adoption in luminality-web, fundbright-web, sidekick-web, and
-> nutripod-web. See [`standard_ledger-design.md`](https://github.com/rarebit-one/standard_ledger/blob/main/standard_ledger-design.md)
-> for the full design and rollout plan.
+> **Status: v0.6.0.** 0.6.0 removed the declarative projection engine
+> (`projects_onto`, the `:inline`/`:async`/`:sql`/`:trigger`/`:matview`/`:manual`
+> modes, `rebuild!`, `with_modes`, the jobs and the `standard_ledger:doctor`
+> task) because no consuming app used it. See the
+> [CHANGELOG](CHANGELOG.md#060---2026-09-24) for the upgrade note and
+> [`standard_ledger-design.md`](standard_ledger-design.md) for the design.
 
 ## What it is
 
-Across our four Rails apps (nutripod-web, luminality-web, fundbright-web,
-sidekick-web) we keep building the same thing: an immutable journal table
-whose rows update one or more cached aggregates on parent records. Inventory
-movements, voucher issuance, payment records, fulfillment records, prompt
-transactions, entitlement grants, validation outcomes, device firmware
-updates — same shape, eight different ad-hoc implementations.
+Our apps keep building the same thing: an immutable journal table (voucher
+issuance, commission entries, runner usage, device events, prompt
+transactions) whose rows are permanent facts. `standard_ledger` gives those
+tables one shared contract on top of the host's existing ActiveRecord models.
+The gem **does not own the schema**: hosts keep their tables and the gem
+adapts to them.
 
-`standard_ledger` extracts the pattern into a single declarative DSL that
-lives on top of the host's existing ActiveRecord models. The gem **does not
-own the schema** — host apps already have entry tables and aggregate columns,
-and the gem adapts to them rather than replacing them.
+What you get:
 
-## Sketch
+| Piece | What it does |
+|---|---|
+| `StandardLedger::Entry` | Makes persisted rows read-only, blocks `destroy` (opt out with `allow_destroy:`), and gives `create!` idempotency-by-unique-index. |
+| `StandardLedger.post` | Sugar over `create!` that maps `targets:` onto `belongs_to` associations and returns a Result (the gem's, or your app's own). |
+| `StandardLedger::Projection` | An optional base class for host-side projector objects you call yourself (`apply` / `rebuild`). |
+| `StandardLedger.refresh!` | `REFRESH MATERIALIZED VIEW [CONCURRENTLY]` for host-owned views, with `concurrently: :auto`. |
+| `post_ledger_entry` | An RSpec block matcher. |
+
+The gem does **not** keep aggregates up to date for you. Updating derived
+state is the host's job: a projector it calls from its own operation, a
+counter update in the same transaction, or a materialized view refreshed on a
+schedule.
+
+## Entries
 
 ```ruby
 class VoucherRecord < ApplicationRecord
   include StandardLedger::Entry
-  include StandardLedger::Projector
 
-  ledger_entry kind:            :action,
-               idempotency_key: :serial_no,
-               scope:           :organisation_id
+  belongs_to :voucher_scheme
+  belongs_to :customer_profile
 
-  projects_onto :voucher_scheme, mode: :inline do
-    on(:grant)    { |scheme, _| scheme.increment(:granted_vouchers_count) }
-    on(:redeem)   { |scheme, _| scheme.increment(:redeemed_vouchers_count) }
-    on(:consume)  { |scheme, _| scheme.increment(:consumed_vouchers_count) }
-    on(:clawback) { |scheme, _| scheme.increment(:clawed_back_vouchers_count) }
-  end
-
-  projects_onto :customer_profile,
-                mode: :inline,
-                if:   -> { customer_profile_id.present? } do
-    on(:grant)    { |profile, _| profile.increment(:granted_vouchers_count) }
-    on(:redeem)   { |profile, _| profile.increment(:redeemed_vouchers_count) }
-    on(:consume)  { |profile, _| profile.increment(:consumed_vouchers_count) }
-    on(:clawback) { |profile, _| profile.increment(:clawed_back_vouchers_count) }
-  end
+  ledger_entry kind:            :action,           # column holding the kind
+               idempotency_key: :serial_no,        # nil = not idempotent
+               scope:           :organisation_id   # unique index is [organisation_id, serial_no]
 end
 ```
 
-Post an entry with the module API (sugar over `VoucherRecord.create!`):
+- After a row is persisted, `save`/`update` raise `ActiveRecord::ReadOnlyRecord`.
+  New, unsaved instances stay writable.
+- `destroy` raises unless `ledger_entry ..., allow_destroy: true`. That option
+  exists so an owner's `dependent: :destroy` cascade can clean up; it doesn't
+  make entries editable.
+- With `idempotency_key:`, a `create!` that trips the matching unique index
+  returns the existing row with `idempotent? == true` instead of raising. The
+  index must exist; the gem raises `StandardLedger::MissingIdempotencyIndex` on
+  first use if it doesn't.
+- `<prefix>.entry.created` fires after commit (see [Events](#events)).
+
+## Posting
 
 ```ruby
 result = StandardLedger.post(VoucherRecord,
-  kind:    :grant,
-  targets: { voucher_scheme: scheme, customer_profile: profile },
-  attrs:   { organisation_id: org.id, serial_no: "v-2025-1" })
+                             kind:    :grant,
+                             targets: { voucher_scheme: scheme, customer_profile: profile },
+                             attrs:   { serial_no: "v-123", organisation_id: org.id })
 
-result.success?     # => true
-result.entry        # => the persisted VoucherRecord
-result.idempotent?  # => false (true on retry against the same serial_no)
-result.projections  # => { inline: [:voucher_scheme, :customer_profile] }
+result.success?     # false when the entry failed validation (errors in result.errors)
+result.idempotent?  # true when the idempotency key matched an existing row
+result.entry        # the persisted (or existing) entry
 ```
 
-Counters on both targets are incremented inside the same transaction as
-the INSERT — if any projection raises, the entry rolls back too. Posting
-twice with the same `serial_no` returns the original entry (with
-`idempotent? == true`) and skips the projection.
+Pass foreign keys through `attrs:` (`voucher_scheme_id: 42`) when you don't
+have a loaded record. A `targets:` key that isn't an association raises
+`ArgumentError`.
 
-Rebuild a target's projection from the log when its counters drift
-or a projection bug needs replaying — extract a `Projection` subclass
-that implements `rebuild(target)` and pass it via `via:`:
+## Projectors
+
+Subclass `StandardLedger::Projection` for a projector your code calls itself:
 
 ```ruby
-class SchemeProjector < StandardLedger::Projection
-  def apply(scheme, entry)
-    scheme.increment(:"#{entry.action}_vouchers_count")
-    scheme.save!
+class Validations::ProfileProjector < StandardLedger::Projection
+  def apply(profile, validation)
+    profile.increment!(:successful_loans_count) if validation.successful?
   end
 
-  def rebuild(scheme)
-    records = VoucherRecord.where(voucher_scheme_id: scheme.id)
-    scheme.update!(
-      granted_vouchers_count:  records.where(action: "grant").count,
-      redeemed_vouchers_count: records.where(action: "redeem").count
-    )
+  def rebuild(profile)
+    profile.update!(successful_loans_count: profile.validations.successful.count)
   end
 end
 
-# Single target, single class, or every target across every projection.
-StandardLedger.rebuild!(VoucherRecord, target: scheme)
-StandardLedger.rebuild!(VoucherRecord, target_class: VoucherScheme)
-StandardLedger.rebuild!(VoucherRecord)
+Validations::ProfileProjector.new.apply(profile, validation)
 ```
 
-Each (target, projection) pair runs in its own transaction; failures
-mid-loop are not unwound. Block-form (delta) projections raise
-`NotRebuildable` because they cannot be reconstructed from the log
-without a host-supplied recompute path.
+Unimplemented `apply` raises `NotImplementedError`. Unimplemented `rebuild`
+raises `StandardLedger::NotRebuildable`.
 
-For projections too expensive or stateful to run inside the entry's
-transaction (jsonb rebuild, multi-row aggregate), use `mode: :async` —
-the strategy enqueues `StandardLedger::ProjectionJob` from
-`after_create_commit`, and the job runs `target.with_lock { projector.apply(target, entry) }`
-on the configured ActiveJob backend:
+## Materialized views
+
+The host creates and owns the view (e.g. with a `scenic` migration) and
+schedules refreshes itself (SolidQueue recurring task, cron, …). The gem
+issues the SQL and emits events. PostgreSQL only.
 
 ```ruby
-class Orders::FulfillableProjector < StandardLedger::Projection
-  # Recompute the jsonb balance from the full log inside with_lock.
-  # `:async` projectors must be retry-safe — async retries can run
-  # `apply` more than once, so block-form per-kind handlers
-  # (incrementing counters) are rejected at registration time.
-  def apply(order, _entry)
-    order.update!(
-      fulfillable_balance: order.fulfillment_records.group(:key).sum(:amount)
-    )
-  end
-
-  def rebuild(order)
-    apply(order, nil)
-  end
-end
-
-class FulfillmentRecord < ApplicationRecord
-  include StandardLedger::Entry
-  include StandardLedger::Projector
-
-  belongs_to :order
-
-  ledger_entry kind: :action, idempotency_key: :external_ref, scope: :organisation_id
-
-  projects_onto :order, mode: :async, via: Orders::FulfillableProjector
-end
+StandardLedger.refresh!(:device_fleet_stats)                        # Config#matview_refresh_strategy
+StandardLedger.refresh!(:device_fleet_stats, concurrently: :auto)   # concurrent when it can be
+StandardLedger.refresh!(:device_fleet_stats, concurrently: true)    # always CONCURRENTLY
+StandardLedger.refresh!(:device_fleet_stats, concurrently: false)   # always plain (blocking)
 ```
 
-Retries are capped by `Config#default_async_retries` (default 3); the
-job emits `<prefix>.projection.applied` and `<prefix>.projection.failed`
-events with an additional `attempt:` key so subscribers can tell
-first-try success from retry success. Tests can force async projections
-to run inline via `StandardLedger.with_modes(FulfillmentRecord => :inline) { ... }`
-— the strategy short-circuits the enqueue and runs the projector
-synchronously inside `with_lock`, so end-to-end coverage works without a
-job runner.
+`REFRESH MATERIALIZED VIEW CONCURRENTLY` has three preconditions. Postgres
+rejects it:
 
-For projections expressible as a single `UPDATE` over an aggregate of the
-log, use `mode: :sql` — no Ruby-side handlers, no AR object loads, just
-a recompute statement that runs in the entry's `after_create`:
+- inside a transaction block (the gem raises `StandardLedger::RefreshInsideTransaction` before sending SQL),
+- on a view that has never been populated (e.g. created `WITH NO DATA`, or empty right after deploy),
+- on a view without a unique index that uses only column names and has no `WHERE` clause.
 
-```ruby
-class VoucherRecord < ApplicationRecord
-  include StandardLedger::Entry
-  include StandardLedger::Projector
+`concurrently: :auto` checks all three first: it looks for an open
+transaction, then reads `pg_class.relispopulated` and `pg_index` for the
+view. It refreshes `CONCURRENTLY` only when all three are met and falls back
+to a plain refresh otherwise. If the catalog lookup itself fails, the error is
+reported to `Rails.error` (`handled: true`, `source: "standard_ledger"`) and a
+plain refresh runs. A job that previously caught
+`PG::ObjectNotInPrerequisiteState` and `RefreshInsideTransaction` to retry
+with `concurrently: false` can pass `concurrently: :auto` instead.
 
-  ledger_entry kind: :action, idempotency_key: :serial_no, scope: :organisation_id
-
-  belongs_to :voucher_scheme
-
-  projects_onto :voucher_scheme, mode: :sql do
-    recompute <<~SQL
-      UPDATE voucher_schemes SET
-        granted_vouchers_count     = (SELECT COUNT(*) FROM voucher_records WHERE voucher_scheme_id = :target_id AND action = 'grant'),
-        redeemed_vouchers_count    = (SELECT COUNT(*) FROM voucher_records WHERE voucher_scheme_id = :target_id AND action = 'redeem'),
-        consumed_vouchers_count    = (SELECT COUNT(*) FROM voucher_records WHERE voucher_scheme_id = :target_id AND action = 'consume'),
-        clawed_back_vouchers_count = (SELECT COUNT(*) FROM voucher_records WHERE voucher_scheme_id = :target_id AND action = 'clawback')
-      WHERE id = :target_id
-    SQL
-  end
-end
-```
-
-The gem binds `:target_id` from the entry's foreign key. The recompute
-SQL is the entire contract — `:sql` projections are naturally
-rebuildable: `StandardLedger.rebuild!` runs the same statement against
-every target the log references.
-
-When the host **already has** a database trigger that updates the
-projection target on every entry INSERT, register it with `mode: :trigger`
-so the gem records the trigger's name and the equivalent rebuild SQL —
-without taking ownership of the trigger DDL. The host writes the trigger
-in a Rails migration; the gem only consumes the metadata.
-
-```ruby
-class InventoryRecord < ApplicationRecord
-  include StandardLedger::Entry
-  include StandardLedger::Projector
-
-  belongs_to :sku
-
-  ledger_entry kind: :action, idempotency_key: :serial_no, scope: :organisation_id
-
-  projects_onto :sku, mode: :trigger,
-                      trigger_name: "inventory_records_apply_to_skus" do
-    rebuild_sql <<~SQL
-      UPDATE skus SET
-        total_count    = c.total_count,
-        reserved_count = c.reserved_count,
-        free_count     = c.total_count - c.reserved_count
-      FROM (
-        SELECT sku_id,
-               COUNT(*) FILTER (WHERE action IN ('grant','adjust_in')) AS total_count,
-               COUNT(*) FILTER (WHERE action = 'reserve')              AS reserved_count
-        FROM inventory_records
-        WHERE sku_id = :target_id
-        GROUP BY sku_id
-      ) c
-      WHERE skus.id = :target_id AND skus.id = c.sku_id
-    SQL
-  end
-end
-```
-
-The trigger continues to fire on every `INSERT` (the host owns the DDL);
-the gem records the trigger name + rebuild SQL for two purposes:
-
-- `StandardLedger.rebuild!(InventoryRecord, target: sku)` runs the
-  recorded `rebuild_sql` with `:target_id` bound to each target's id.
-- `bin/rails standard_ledger:doctor` verifies that every registered
-  `:trigger` projection's named trigger exists in the connected schema
-  (queries `pg_trigger`). Run this as a deploy-time check — migration
-  drift surfaces immediately rather than at runtime. **Postgres-only**;
-  the task raises on non-Postgres connections.
-
-Registration rejects `via:`, `lock:`, and `permissive:` (none are
-meaningful when the trigger itself is the contract). The `trigger_name:`
-keyword is required; the block must call `rebuild_sql "..."` exactly
-once with a SQL string containing the `:target_id` placeholder.
-
-Refresh a `:matview` projection ad-hoc when the host needs immediate
-read-your-write semantics (e.g. at the end of a draw operation, before
-the next scheduled refresh would otherwise show stale counts):
-
-```ruby
-class PromptTxn < ApplicationRecord
-  include StandardLedger::Entry
-  include StandardLedger::Projector
-
-  belongs_to :user_profile
-
-  ledger_entry kind: :event, idempotency_key: nil
-
-  projects_onto :user_profile,
-                mode:    :matview,
-                view:    "user_prompt_inventories",
-                refresh: { every: 5.minutes, concurrently: true }
-end
-
-# Schedule the recurring refresh from the host (SolidQueue Recurring
-# Tasks, sidekiq-cron, etc.) targeting:
-#   StandardLedger::MatviewRefreshJob
-#   args: ["user_prompt_inventories", { concurrently: true }]
-
-# Ad-hoc refresh after a critical write:
-StandardLedger.refresh!(:user_prompt_inventories)               # honors Config#matview_refresh_strategy
-StandardLedger.refresh!("user_prompt_inventories", concurrently: true)
-```
-
-`StandardLedger.rebuild!(PromptTxn)` is equivalent to refreshing every
-`:matview` projection on the entry class — for matview, refresh *is*
-rebuild. Postgres has no partial-refresh primitive, so `target:` /
-`target_class:` scope arguments are ignored for `:matview` projections
-and the full view is always refreshed.
-
-Note: the default `:concurrent` strategy (and `concurrently: true`) requires
-a unique index on the matview — Postgres rejects `REFRESH MATERIALIZED VIEW
-CONCURRENTLY` otherwise. Add a unique index in the host migration that
-creates the view, or set `Config#matview_refresh_strategy = :blocking` (or
-pass `concurrently: false` per-call) if a unique index isn't an option.
-
-Five projection modes — pick per declaration:
-
-| Mode | Where the work runs | Transactional? | Rebuildable? |
-|---|---|---|---|
-| `:inline` | `after_create`, in the entry's transaction | yes | yes (if projector implements `rebuild`) |
-| `:async` | `after_create_commit` job, `with_lock` | no | yes (if projector implements `rebuild`) |
-| `:sql` | `after_create`, single `UPDATE ... FROM (SELECT ...)` | yes | yes (rebuild = same SQL) |
-| `:trigger` | the database, on INSERT | yes (same statement) | yes (host-owned trigger; gem records rebuild SQL) |
-| `:matview` | scheduled `REFRESH MATERIALIZED VIEW CONCURRENTLY` | no | trivially (refresh = rebuild) |
+`refresh!` returns a success Result with
+`projections[:refreshed] = [{ view:, concurrently: }]` (the concurrency mode
+that was actually used). If the SQL fails, it emits `projection.failed` and
+re-raises so your job runner can retry. View names must be bare or
+`schema.view` identifiers. Anything else raises `ArgumentError`.
 
 ## Installation
 
-The gem is published on RubyGems:
-
 ```ruby
-gem "standard_ledger", "~> 0.4"
+gem "standard_ledger", "~> 0.6"
 ```
 
-(It was git-pinned during incubation. Don't reintroduce a `git:` reference —
-it makes a bare `bundle install` a prerequisite for every other command in a
-fresh checkout, blocking `rubocop`/`rspec` until it has been run.)
-
-Then run the install generator to drop a configured initializer in place:
+(Don't reintroduce a `git:` reference. It makes a bare `bundle install` a
+prerequisite for every other command in a fresh checkout.)
 
 ```bash
 bin/rails g standard_ledger:install
 ```
 
-This writes `config/initializers/standard_ledger.rb` with commented-out
-examples covering every public `Config` setting — uncomment and edit only
-what you want to override. The generator is idempotent; re-running on an
-existing initializer skips with a clear message (pass `--force` to
-overwrite).
-
-A typical configuration looks like:
+This writes `config/initializers/standard_ledger.rb` with every setting
+commented out. A typical configuration:
 
 ```ruby
-StandardLedger.configure do |c|
-  c.default_async_retries     = 3
-  c.scheduler                 = :solid_queue
-  c.matview_refresh_strategy  = :concurrent
+Rails.application.config.to_prepare do
+  StandardLedger.configure do |c|
+    c.matview_refresh_strategy = :auto   # :concurrent (default) | :blocking | :auto
 
-  # Optional — return the host's Result type from StandardLedger.post:
-  c.result_class   = ApplicationOperation::Result
-  c.result_adapter = ->(success:, value:, errors:, entry:, idempotent:, projections:) {
-    ApplicationOperation::Result.new(success:, value: value || entry, errors:)
-  }
+    # Optional — return the host's Result type from post / refresh!:
+    c.result_class   = ApplicationOperation::Result
+    c.result_adapter = ->(success:, value:, errors:, entry:, idempotent:, projections:) {
+      ApplicationOperation::Result.new(success:, value: { entry: value || entry, idempotent:, projections: }, errors:)
+    }
+  end
 end
 ```
 
+The adapter always receives all six keywords. `projections:` is `{}` for
+`post` and `{ refreshed: [...] }` for `refresh!`.
+
 ## Events
 
-The gem emits five lifecycle events. On Rails 8.1+ they go through
-`Rails.event.notify(name, **payload)`; on older Rails (or any host without the
-structured reporter) they fall back to
-`ActiveSupport::Notifications.instrument(name, payload)`. The backend is
-detected per call, not cached at load — the gem is required before Rails has
-finished booting.
-
-Every name is prefixed with `Config#notification_namespace` (default
-`standard_ledger`), so a host that renames the namespace renames all five.
+On Rails 8.1+ events go through `Rails.event.notify(name, **payload)`. On
+older Rails they fall back to
+`ActiveSupport::Notifications.instrument(name, payload)`. Names are prefixed
+with `Config#notification_namespace` (default `standard_ledger`).
 
 | Event | Fired when | Payload |
 |---|---|---|
-| `<prefix>.entry.created` | after the entry's transaction commits | `entry:`, `kind:`, `targets:` (a `{ name => target }` hash) |
-| `<prefix>.projection.applied` | a projection wrote successfully | `entry:`, `target:`, `projection:`, `mode:`, `duration_ms:` — plus `attempt:` in `:async` mode |
-| `<prefix>.projection.failed` | a projection raised | the `applied` payload plus `error:` (the exception) |
+| `<prefix>.entry.created` | after the entry's transaction commits (not on idempotent returns) | `entry:`, `kind:`, `targets:` (`{ name => record }` for non-nil `belongs_to`) |
 | `<prefix>.projection.refreshed` | a matview refresh succeeded | `view:`, `concurrently:`, `duration_ms:` |
-| `<prefix>.projection.rebuilt` | `StandardLedger.rebuild!` finished one target | `entry_class:`, `target:`, `projection:`, `mode:` |
+| `<prefix>.projection.failed` | the `REFRESH` SQL raised | `view:`, `concurrently:`, `mode: :matview`, `error:` |
 
-Four payload shapes are worth knowing before you write a subscriber that
-assumes a key is always present:
-
-- **`:sql` mode sends `target: nil`.** The recompute statement is bound by
-  `:target_id` and never loads the record, so there is no object to hand you.
-- **`:matview` events carry `view:`/`concurrently:` instead of
-  `entry:`/`target:`.** A refresh is view-wide — Postgres has no partial-refresh
-  primitive — so no single entry or target caused it. The matview variant of
-  `projection.failed` also carries `mode: :matview`, while
-  `projection.refreshed` carries no `mode:` at all.
-- **`projection.rebuilt` carries `entry_class:`, not `entry:`.** Rebuild is
-  log replay across an entire class; there is no originating entry.
-- **`projection.failed` is not fired for input errors.** An `ArgumentError`
-  from the matview name validator, or `RefreshInsideTransaction` from the
-  boundary check, propagates without an event — the SQL was never issued, so
-  nothing failed to project.
+`projection.failed` doesn't fire for input errors (an invalid view name, or
+`RefreshInsideTransaction`) because no SQL was sent. The event names keep
+their pre-0.6 `projection.*` spelling so existing subscribers keep working.
 
 **Subscriber exceptions are swallowed** (warned to stderr, not re-raised).
-Ledger observability must never take down a host's request path: by emit time
-the projection has already either succeeded or been rolled back, so there is
-nothing a raising subscriber could usefully abort. Don't put work in a
-subscriber that you need to have happened.
-
-Retries: `:async` projections are capped by `Config#default_async_retries`
-(default 3), and both `applied` and `failed` carry `attempt:` so subscribers
-can tell first-try success from retry success.
-
-`standard_audit` consumers can subscribe to `entry.created` to write an audit
-row; the gem itself never calls into audit. That coupling is deliberately the
-host's to opt into — see "Relationship to standard_audit" below.
+Ledger observability must never take down a request.
 
 ## Testing
 
-The gem ships an opt-in RSpec support file. Hosts add this to their
-`spec/rails_helper.rb`:
-
 ```ruby
+# spec/rails_helper.rb
 require "standard_ledger/rspec"
 ```
 
-That registers a `before(:each)` hook that calls
-`StandardLedger.reset_mode_overrides!` between examples (so `with_modes`
-overrides don't leak). It deliberately does not call the full `reset!`, which
-would wipe configuration your initializers set up. It also exposes:
+This defines the `post_ledger_entry` block matcher. It listens on the channel
+the gem emits through, so it works on Rails 8.1+ as well:
 
-- `post_ledger_entry(EntryClass).with(...)` — a block matcher that
-  subscribes to the `<namespace>.entry.created` event for the duration of
-  the block, on the same channel the gem emits through (`Rails.event` on
-  Rails 8.1+, `ActiveSupport::Notifications` otherwise), and asserts an entry of the expected class was
-  written (with optional `kind:`/`targets:`/`attrs:` constraints).
+```ruby
+expect {
+  Vouchers::IssueOperation.call(scheme: scheme, profile: profile)
+}.to post_ledger_entry(VoucherRecord).with(
+  kind:    :grant,
+  targets: { voucher_scheme: scheme },
+  attrs:   { serial_no: "v-2025-1" }
+)
+```
 
-  ```ruby
-  it "records a voucher grant" do
-    expect {
-      Vouchers::IssueOperation.call(scheme: scheme, profile: profile)
-    }.to post_ledger_entry(VoucherRecord).with(
-      kind:    :grant,
-      targets: { voucher_scheme: scheme, customer_profile: profile },
-      attrs:   { serial_no: "v-2025-1" }
-    )
-  end
-  ```
-
-- `with_modes(EntryClass => :inline) { ... }` — forces specific entry
-  classes' projections to run inline for the duration of the block. The
-  override is thread-local and restored on block exit, so async-mode
-  projections can be exercised end-to-end in a unit spec without a job
-  runner.
-
-  ```ruby
-  it "fast-runs an async projection inline" do
-    with_modes(PaymentRecord => :inline) do
-      Orders::CheckoutOperation.call(...)
-    end
-  end
-  ```
+It registers no hooks and never resets your `Config`.
 
 ## Development
 
@@ -428,15 +218,14 @@ bundle exec rubocop
 
 ## Relationship to standard_audit
 
-Different gems, different concerns:
+- **`standard_audit`**: "user X took action Y on target Z", with free-form
+  metadata.
+- **`standard_ledger`**: typed, immutable, idempotent journal rows that other
+  state is derived from.
 
-- **`standard_audit`** — "user X took action Y on target Z," free-form
-  metadata, no projection.
-- **`standard_ledger`** — "this delta updates these targets," typed kind,
-  mandatory projection.
-
-A single host operation typically writes one of each, in one transaction.
-Neither subsumes the other.
+A single host operation often writes one of each. Subscribe to
+`entry.created` if you want an audit row per entry. The gem never calls into
+audit itself.
 
 ## License
 

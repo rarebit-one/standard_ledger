@@ -1,8 +1,8 @@
 # AGENTS.md - AI Agent Guide for StandardLedger
 
-StandardLedger is a Ruby gem that captures the recurring "immutable journal entry → N aggregate projections" pattern as a declarative DSL on host ActiveRecord models. The design is documented in [`standard_ledger-design.md`](./standard_ledger-design.md); read it before making non-trivial changes.
+StandardLedger is a Ruby gem that makes host ActiveRecord models immutable, append-only, idempotent journal entries, with a `StandardLedger.post` helper, a `Projection` base class for host-side projectors, and `StandardLedger.refresh!` for host-owned PostgreSQL materialized views. Read [`standard_ledger-design.md`](./standard_ledger-design.md) before making non-trivial changes.
 
-> **Status: v0.3.0** — feature-complete across all five projection modes (`:inline`, `:async`, `:sql`, `:matview`, `:trigger`) plus `StandardLedger.rebuild!` log-replay, `StandardLedger.refresh!` ad-hoc matview refresh, and the `standard_ledger:doctor` rake task. Ready for adoption in luminality-web, fundbright-web, sidekick-web, and nutripod-web. See `standard_ledger-design.md` for the full design and rollout plan.
+> **Status: v0.6.0.** 0.6.0 removed the declarative projection engine (`projects_onto`, the six modes, `rebuild!`, `with_modes`, the jobs, the `doctor` task, the Rails engine) because no consumer used it. Design doc §8 has the history. Don't reintroduce any of it without a consumer that needs it.
 
 ## Quick Reference
 
@@ -28,84 +28,49 @@ bundle exec bundler-audit --update
 
 ```
 standard_ledger/
+├── lib/standard_ledger.rb          # configure / config / reset! / post / refresh!
 ├── lib/standard_ledger/
-│   ├── version.rb        # Gem version
-│   ├── errors.rb         # Error hierarchy
+│   ├── version.rb
+│   ├── errors.rb         # Error, NotRebuildable, MissingIdempotencyIndex, RefreshInsideTransaction
 │   ├── event_emitter.rb  # Routes events to Rails.event.notify (Rails 8.1+) or ActiveSupport::Notifications
 │   ├── result.rb         # StandardLedger::Result (default return type)
-│   ├── config.rb         # StandardLedger.configure { |c| ... }
-│   ├── engine.rb         # Rails engine boot hook
-│   ├── entry.rb          # `include StandardLedger::Entry` concern
-│   ├── projector.rb      # `include StandardLedger::Projector` concern + `projects_onto` DSL
-│   ├── projection.rb     # Base class for class-form projectors
-│   ├── modes/
-│   │   ├── inline.rb     # `:inline` mode runtime — installs `after_create`, applies projections, coalesces multi-counter writes
-│   │   ├── async.rb      # `:async` mode runtime — installs `after_create_commit`, enqueues ProjectionJob per (entry, target), honors `with_modes(:inline)` override
-│   │   ├── sql.rb        # `:sql` mode runtime — installs `after_create`, runs the recompute SQL with `:target_id` bound from the entry's FK
-│   │   ├── matview.rb    # `:matview` mode runtime — issues `REFRESH MATERIALIZED VIEW [CONCURRENTLY]`, no per-entry callback
-│   │   └── trigger.rb    # `:trigger` mode runtime — no-op marker; the host owns the DB trigger, the gem records `trigger_name` + `rebuild_sql` for `rebuild!` and `doctor`
-│   ├── jobs/
-│   │   ├── matview_refresh_job.rb # ActiveJob wrapper around `StandardLedger.refresh!` for hosts to schedule
-│   │   └── projection_job.rb      # ActiveJob class run by `:async` mode; resolves target, wraps `target.with_lock { projector.apply(target, entry) }`, retries up to `Config#default_async_retries`
-│   └── tasks/
-│       └── standard_ledger.rake   # `standard_ledger:doctor` — verifies every `:trigger` projection's named trigger exists in `pg_trigger` (Postgres-only)
-├── lib/generators/standard_ledger/install/
-│   ├── install_generator.rb       # `rails g standard_ledger:install`
-│   └── templates/initializer.rb.tt # Generated initializer with commented-out Config DSL
-└── spec/                 # RSpec tests
+│   ├── config.rb         # matview_refresh_strategy, result_class/result_adapter, notification_namespace
+│   ├── entry.rb          # `include StandardLedger::Entry`: immutability + idempotency-by-unique-index
+│   ├── projection.rb     # Base class for host projectors (apply / rebuild); the gem never calls it
+│   ├── matview.rb        # REFRESH SQL, identifier validation, transaction guard, `concurrently: :auto` catalog probe (@api private)
+│   ├── rspec.rb          # opt-in `require "standard_ledger/rspec"`
+│   └── rspec/matchers.rb # `post_ledger_entry` block matcher
+├── lib/generators/standard_ledger/install/   # `rails g standard_ledger:install` + initializer template
+└── spec/                 # RSpec, SQLite in-memory harness under spec/dummy/
 ```
 
-`StandardLedger.rebuild!(EntryClass, target:, target_class:, batch_size:)` (in `lib/standard_ledger.rb`) drives the log-replay path: for `:inline` projections it dispatches to the registered projector class's `rebuild(target)` (firing `<prefix>.projection.rebuilt` per success); for `:sql` and `:trigger` projections it runs the recorded recompute / rebuild SQL with `:target_id` bound to each target; for `:matview` projections it issues a single `REFRESH MATERIALIZED VIEW [CONCURRENTLY] <view>` (firing `<prefix>.projection.refreshed`) — refresh *is* rebuild for matview. It refuses block-form (delta) `:inline` projections plus modes other than `:inline`/`:sql`/`:matview`/`:trigger` until the remaining `:async` PR lands.
-
-`StandardLedger.refresh!(view_name, concurrently: nil)` is the ad-hoc matview refresh API for hosts that need immediate read-your-write semantics (e.g. at the end of an operation, before the next scheduled refresh would otherwise show stale counts). `StandardLedger::MatviewRefreshJob` is the ActiveJob wrapper hosts point their scheduler (SolidQueue Recurring Tasks, sidekiq-cron, etc.) at.
-
-The remaining `:async` mode lands in a subsequent PR — see `CHANGELOG.md` "Pending" for the complete list. `StandardLedger.post(EntryClass, kind:, targets:, attrs:)` ships in the same PR as the inline runtime.
-
-The `standard_ledger:doctor` rake task (in `lib/tasks/standard_ledger.rake`, auto-loaded by `Engine.rake_tasks`) iterates every registered `:trigger` projection across loaded entry classes and queries `pg_trigger` to verify each named trigger exists in the connected schema. Postgres-only by design; nutripod-web is the only adopter today and runs Postgres. Run as a deploy-time check — exits 1 with a stderr report when triggers are missing.
+There is no Rails engine or railtie. Rails finds the generator on the load path.
 
 ## Key Patterns
 
-### Entry + Projector DSL
-
-The host marks an existing model as a ledger entry and declares one or more projections. Each `projects_onto` registers a `Definition` struct on the host class; the gem reads these at runtime to drive `StandardLedger.post`.
+### Entry
 
 ```ruby
 class VoucherRecord < ApplicationRecord
   include StandardLedger::Entry
-  include StandardLedger::Projector
 
   ledger_entry kind:            :action,
                idempotency_key: :serial_no,
                scope:           :organisation_id
-
-  projects_onto :voucher_scheme, mode: :inline do
-    on(:grant)    { |scheme, _| scheme.increment(:granted_vouchers_count) }
-    on(:redeem)   { |scheme, _| scheme.increment(:redeemed_vouchers_count) }
-    on(:consume)  { |scheme, _| scheme.increment(:consumed_vouchers_count) }
-    on(:clawback) { |scheme, _| scheme.increment(:clawed_back_vouchers_count) }
-  end
 end
 ```
 
-For non-trivial projectors (jsonb shape, multi-row aggregates), extract a `StandardLedger::Projection` subclass with `apply` and `rebuild` and pass it via `via:`.
+The invariants live in `.claude/rules/ledger-entry-contract.md`: persisted rows are read-only, `destroy` is blocked unless `allow_destroy: true`, and a collision on the idempotency index returns the existing row with `idempotent? == true`. The index is validated on the first `create!`, and a missing one raises `MissingIdempotencyIndex`.
 
-### Five projection modes
+### `StandardLedger.post`
 
-Each mode is a strategy class implementing the same internal interface. Hosts pick per-projection; different projections on the same entry can use different modes.
+This is sugar over `create!`. `targets:` are assigned through `belongs_to` (an unknown key raises `ArgumentError`) and `attrs:` are merged. It returns a Result (`idempotent?` on an idempotent return, `failure?` with errors on `RecordInvalid`). `projections` is always `{}`. The key survives only for adapter-signature compatibility.
 
-| Mode | Where | Transactional with INSERT? | Rebuildable from log? |
-|---|---|---|---|
-| `:inline` | `after_create`, in entry's transaction | yes | if projector implements `rebuild` |
-| `:async` | `after_create_commit` job + `with_lock` | no | if projector implements `rebuild` |
-| `:sql` | `after_create`, single `UPDATE ... FROM (SELECT ...)` | yes | yes (rebuild = same SQL) |
-| `:trigger` | the database, on INSERT | yes | yes (host-owned trigger; gem records rebuild SQL) |
-| `:matview` | scheduled `REFRESH MATERIALIZED VIEW CONCURRENTLY` | no | trivially (refresh = rebuild) |
+### `StandardLedger.refresh!(view, concurrently: nil | true | false | :auto)`
 
-See design doc §5.3 for full semantics and §5.3.6 for the selection cheat sheet.
+`nil` reads `Config#matview_refresh_strategy` (`:concurrent`/`:blocking`/`:auto`). `true` raises `RefreshInsideTransaction` inside a transaction. `:auto` uses `CONCURRENTLY` only when no transaction is open, `pg_class.relispopulated` is true, and a valid unique index exists with no predicate or expressions. Otherwise it runs a plain refresh. A failing probe is reported via `Rails.error` (handled) and degrades to a plain refresh. It emits `projection.refreshed` / `projection.failed`, and SQL errors re-raise.
 
 ### Result class + host interop
-
-The gem ships `StandardLedger::Result` with `success?`/`failure?`/`idempotent?`/`entry`/`value`/`errors`/`projections`. Hosts with their own Result type (e.g. `ApplicationOperation::Result`) wire up an adapter:
 
 ```ruby
 StandardLedger.configure do |c|
@@ -116,52 +81,32 @@ StandardLedger.configure do |c|
 end
 ```
 
-`Config#custom_result?` is true only when both fields are set; the gem falls back to its built-in Result otherwise.
-
-### Idempotency contract
-
-Entries declaring `idempotency_key:` MUST have a matching unique index on the table. The gem validates this at boot; missing indexes raise `MissingIdempotencyIndex`. At runtime, `RecordNotUnique` from a duplicate insert is caught and the existing row is returned with `idempotent? == true`. The projection is **not** re-applied for idempotent returns — the original write already projected.
-
-Entries that genuinely cannot be retried safely (telemetry events with no natural key) declare `idempotency_key: nil` explicitly. Boot-time validation and `RecordNotUnique` rescue land in the next PR.
+`Config#custom_result?` is true only when both fields are set. Keep all six adapter keywords stable, because consumer lambdas declare them explicitly.
 
 ## Relationship to standard_audit
 
-Different gems, different concerns:
+- **`standard_audit`**: "user X took action Y on target Z", with free-form metadata.
+- **`standard_ledger`**: typed, immutable, idempotent journal rows.
 
-- **`standard_audit`** — "user X took action Y on target Z," free-form metadata, no projection.
-- **`standard_ledger`** — "this delta updates these targets," typed kind, mandatory projection.
-
-A single host operation typically writes one of each, in one transaction. Neither subsumes the other.
+A single host operation often writes one of each. Neither subsumes the other.
 
 ## Test Strategy
 
-Specs are colocated by topic (`spec/standard_ledger/<topic>_spec.rb`). End-to-end coverage of the inline runtime lives in `spec/standard_ledger/inline_integration_spec.rb`, which exercises `StandardLedger.post` against the `spec/dummy/` SQLite harness — multi-target fan-out, transactional rollback, idempotent retry, all three notifications, `lock: :pessimistic`, multi-counter coalescing, and Result interop. End-to-end coverage of the `:sql` mode lives in `spec/standard_ledger/sql_integration_spec.rb`, which exercises registration validation (missing `recompute`, `via:`/`lock:`/`permissive:` rejection, `:target_id` placeholder enforcement), after-create execution, transactional rollback when a sibling callback raises, the `if:`-guard skip, the nil-FK skip, the `applied`/`failed` notifications, idempotent install, and `rebuild!` for both single-target and walk-the-log scoping. End-to-end coverage of the matview runtime lives in `spec/standard_ledger/matview_integration_spec.rb`, which mocks `connection.execute` (SQLite has no `REFRESH MATERIALIZED VIEW`) to capture the SQL the gem would issue in Postgres and asserts the DSL surface, the `refresh!` API + identifier validation, the `MatviewRefreshJob` delegation contract, and `rebuild!` for matview projections. End-to-end coverage of the `:trigger` mode lives in `spec/standard_ledger/trigger_integration_spec.rb`, which exercises registration validation (missing `trigger_name`, missing block, `via:`/`lock:`/`permissive:` rejection, `:target_id` placeholder, double `rebuild_sql`), the no-callback contract (creating an entry does NOT mutate the target via Ruby — that's the trigger's job in production), and `rebuild!` for both single-target and walk-the-log scoping. The `standard_ledger:doctor` rake task is exercised in `spec/standard_ledger/tasks/doctor_spec.rb`, which mocks `connection.exec_query` against `pg_trigger` to assert success / missing-trigger / no-`:trigger`-projections behaviours without booting a real Postgres database. End-to-end coverage of the rebuild path lives in `spec/standard_ledger/rebuild_integration_spec.rb`, which replays a 50-entry log via a class-form projector to restore truncated counters, asserts the `target:` / `target_class:` / no-arg scoping rules, and verifies the `<prefix>.projection.rebuilt` notification, `NotRebuildable` for block-form projections, and `Error` for unsupported modes. The base of unit specs (`Config`, `Result`, `Entry`, `Projector`) covers the lower-level surfaces in isolation.
+Specs are colocated by topic (`spec/standard_ledger/<topic>_spec.rb`) and run against an in-memory SQLite database (`spec/dummy/`). `entry_spec.rb` covers immutability and idempotency. `post_spec.rb` covers `post`, including idempotent retry, failure Results, `entry.created` and adapter interop. `refresh_spec.rb` covers `refresh!`: it stubs `connection.execute` / `connection.select_one` because SQLite has no matviews, and exercises identifier validation, the transaction guard, events, and every `:auto` branch. The `:auto` catalog SQL was also verified against real PostgreSQL 17 during 0.6.0 development.
 
-### Host-app helpers (`require "standard_ledger/rspec"`)
-
-Host apps opt into the gem's RSpec support by adding `require "standard_ledger/rspec"` to their `spec/rails_helper.rb`. Loading that file:
-
-- Registers a `before(:each)` hook that calls `StandardLedger.reset_mode_overrides!`, which clears the thread-local `with_modes` override map between examples. It deliberately does not call `reset!`, so host initializer configuration survives.
-- Defines the `post_ledger_entry(EntryClass).with(kind:, targets:, attrs:)` block matcher — subscribes to `<namespace>.entry.created` on whichever channel `EventEmitter` selects (`Rails.event` on Rails 8.1+, `ActiveSupport::Notifications` otherwise), captures every event fired during the block, and asserts (or refutes, when negated) that a matching event was emitted.
-- Auto-includes `StandardLedger::RSpec::Helpers` into every example group, exposing `with_modes(...)` as sugar over `StandardLedger.with_modes`.
-
-`StandardLedger.with_modes(EntryClass => :inline) { ... }` writes its overrides into a thread-local hash; mode strategies will consult `StandardLedger.mode_override_for(entry_class)` once `Modes::Async` ships. Today (only `:inline` exists) it's effectively a no-op for already-inline projections — the API lands now so async-mode specs can opt into the inline path the moment the strategy ships.
-
-Future spec coverage (lands with the corresponding PRs):
-
-- `:async` mode transactional semantics (jobs enqueue at `after_create_commit`, with `with_lock` inside the job)
+`require "standard_ledger/rspec"` (for host apps) defines only the `post_ledger_entry` matcher. It registers no hooks and never touches `Config`.
 
 ## Conventions
 
 - **Style:** rubocop-rails-omakase. Run `bin/rubocop -A` before pushing.
 - **Worktree-only:** see `CLAUDE.md`. The pre-tool-use hook blocks edits in the main checkout.
 - **Signed commits:** lefthook's `verify-signatures.sh` rejects unsigned commits at push time. Configure SSH or GPG signing in your local git config.
-- **PR cadence:** keep PRs small and aligned with the rollout in design doc §10. Each adopter (nutripod vouchers, nutripod inventory, etc.) should be one PR plus its preceding gem-side PR for any new mode/feature it requires.
+- **PR cadence:** keep PRs small. Before adding API surface, confirm a consumer (see `CLAUDE.md`) will call it.
 - **No emojis** in code or commit messages unless explicitly requested.
 - **Comments:** prefer self-documenting code. Add comments only when the *why* is non-obvious (a constraint, a workaround, a subtle invariant). Don't comment what the code does.
 
 ## Useful References
 
-- `standard_ledger-design.md` — full design discussion, per-app rollout, open questions.
-- `CHANGELOG.md` — what's shipped and what's pending.
+- `standard_ledger-design.md`: current design, consumer usage, and the history of the removed projection engine.
+- `CHANGELOG.md`: what has shipped.
 - `standard_circuit/AGENTS.md` and `standard_audit/AGENTS.md` — conventions for the sibling gems in the rarebit-one workspace.

@@ -6,8 +6,8 @@ Gem::Specification.new do |spec|
   spec.authors     = [ "Jaryl Sim" ]
   spec.email       = [ "code@jaryl.dev" ]
   spec.homepage    = "https://github.com/rarebit-one/standard_ledger"
-  spec.summary     = "Immutable journal entries with declarative aggregate projections for Rails apps."
-  spec.description = "StandardLedger captures the recurring 'append-only entry → N projection updates' pattern as a declarative DSL on host ActiveRecord models. Supports five projection modes — :inline, :async, :sql, :matview, :trigger — plus a deterministic rebuild path from the entry log, ad-hoc materialized view refresh, and a doctor rake task that verifies host-owned trigger presence. Enforces idempotency-by-unique-index and immutability at the entry level."
+  spec.summary     = "Immutable, append-only journal entries and materialized-view refresh for Rails apps."
+  spec.description = "StandardLedger marks ActiveRecord models as immutable, append-only journal entries with idempotency-by-unique-index, provides a StandardLedger.post helper that returns a Result (optionally the host's own Result type), a Projection base class for host-side projectors, and StandardLedger.refresh! for host-owned PostgreSQL materialized views (including concurrently: :auto)."
   spec.license     = "MIT"
 
   spec.metadata["homepage_uri"] = spec.homepage
@@ -26,9 +26,7 @@ Gem::Specification.new do |spec|
 
   spec.add_dependency "railties", ">= 8.0"
   spec.add_dependency "activerecord", ">= 8.0"
-  spec.add_dependency "activejob", ">= 8.0"
   spec.add_dependency "activesupport", ">= 8.0"
-  spec.add_dependency "concurrent-ruby", "~> 1.3"
 
   spec.add_development_dependency "brakeman"
   spec.add_development_dependency "bundler-audit"

@@ -6,6 +6,89 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-24
+
+A breaking release. The declarative projection engine is removed, and the gem
+now ships only what its four consumers use: `Entry`, `post`, `Projection`,
+`refresh!`, `Config`, the events, and the RSpec matcher. Before this release,
+every consumer's `main` (jumpdrive-web, sidekick-web, fundbright-web,
+luminality-web) was grepped (app, lib, config, spec, db). None of them
+referenced anything listed under **Removed**.
+
+### Removed
+- **Projection DSL:** `StandardLedger::Projector`, `projects_onto`,
+  `standard_ledger_projections`, `standard_ledger_projections_for`, and the
+  `Projector::Definition` struct.
+- **All projection modes:** `StandardLedger::Modes::Inline`, `::Async`, `::Sql`,
+  `::Trigger`, `::Matview` (its refresh logic moved to the private
+  `StandardLedger::Matview`), and `:manual`.
+- **Jobs:** `StandardLedger::ProjectionJob` and
+  `StandardLedger::MatviewRefreshJob`. The gem no longer depends on `activejob`
+  (or declares `concurrent-ruby` directly).
+- **`StandardLedger.rebuild!`**. `Projection#rebuild` stays as a method your own
+  code calls.
+- **Test-mode overrides:** `StandardLedger.with_modes`,
+  `StandardLedger.mode_override_for`, `StandardLedger.reset_mode_overrides!`,
+  `StandardLedger::RSpec::Helpers`, and the `before(:each)` hook that
+  `require "standard_ledger/rspec"` used to register. The file now defines only
+  the `post_ledger_entry` matcher.
+- **`rake standard_ledger:doctor`** and `StandardLedger::Engine`. The engine
+  had no routes or tables, and its initializer was a no-op. The install
+  generator still works without it.
+- **Errors:** `StandardLedger::PartialFailure` (never raised) and
+  `StandardLedger::UnhandledKind` (only raised by the projection DSL).
+- **Config:** `default_async_job`, `default_async_retries`, and `scheduler`.
+  None of them was read by anything outside the engine, and no consumer
+  initializer sets them (jumpdrive-web's generated initializer only has them
+  as comments).
+- **Events:** `<prefix>.projection.applied` and `<prefix>.projection.rebuilt`
+  (only the engine emitted them). `entry.created`, `projection.refreshed` and
+  `projection.failed` are unchanged.
+- `StandardLedger.post` no longer reports `projections[:inline]`. It always
+  passes `projections: {}`. The keyword is still passed to `result_adapter`,
+  so existing six-keyword adapters keep working.
+
+### Added
+- `StandardLedger.refresh!(view, concurrently: :auto)` uses
+  `REFRESH MATERIALIZED VIEW CONCURRENTLY` only when it can succeed: no open
+  transaction, the view is populated (`pg_class.relispopulated`), and it has a
+  valid unique index without a `WHERE` clause or expressions (`pg_index`).
+  Otherwise it runs a plain refresh. If the catalog probe raises, the error is
+  reported through `Rails.error` (`handled: true`, `severity: :warning`,
+  `source: "standard_ledger"`) and the refresh falls back to plain. This
+  replaces the rescue-and-retry around `PG::ObjectNotInPrerequisiteState` /
+  `RefreshInsideTransaction` in sidekick-web's `RefreshMaterializedViewsJob`.
+  It was verified against PostgreSQL 17 for an empty view, unique, non-unique,
+  partial and expression indexes, a refresh inside a transaction, and a
+  missing view.
+- `Config#matview_refresh_strategy` accepts `:auto`.
+
+### Changed
+- `refresh!` now raises `ArgumentError` for an unknown `concurrently:` value
+  or an unknown `matview_refresh_strategy`. Before, an unknown strategy
+  silently meant a blocking refresh.
+- `RefreshInsideTransaction`'s message now suggests `concurrently: :auto`.
+- The gemspec summary, description, README, design doc, `AGENTS.md`, and
+  `docs/MIGRATION_GUIDE.md` now describe the slimmed gem. The design doc keeps
+  a history section on the removed engine (§8).
+
+### Upgrade note (0.5.x → 0.6.0)
+1. Bump to `gem "standard_ledger", "~> 0.6"`. No consumer on 2026-09-24
+   referenced anything removed, so no application code changes are needed.
+2. **Sorbet/Tapioca apps:** regenerate the RBIs (`bin/tapioca gem
+   standard_ledger` and `bin/tapioca dsl`). Delete any stale
+   `sorbet/rbi/dsl/standard_ledger/{projector,projection_job,matview_refresh_job}.rbi`.
+   All four consumers carry these today, and they describe constants that no
+   longer exist, so `tapioca dsl --verify` will flag them.
+3. If your initializer sets `c.default_async_job`, `c.default_async_retries`
+   or `c.scheduler`, delete the line (it now raises `NoMethodError`). The
+   generated initializer only has them as comments, which you can remove too.
+4. Optional: replace hand-rolled "try CONCURRENTLY, fall back to plain"
+   logic with `StandardLedger.refresh!(view, concurrently: :auto)`, or set
+   `c.matview_refresh_strategy = :auto`.
+5. If you ever did depend on the engine, pin `~> 0.5` and see git tag
+   `v0.5.1` and design doc §8.
+
 ## [0.5.1] - 2026-09-24
 
 ### Fixed
@@ -466,7 +549,8 @@ roadmap.
   and `:trigger` (host-owned, gem records rebuild SQL).
 - `standard_ledger:doctor` rake task (verifies trigger presence, etc.).
 
-[Unreleased]: https://github.com/rarebit-one/standard_ledger/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/rarebit-one/standard_ledger/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/rarebit-one/standard_ledger/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/rarebit-one/standard_ledger/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/rarebit-one/standard_ledger/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/rarebit-one/standard_ledger/compare/v0.3.0...v0.4.0
