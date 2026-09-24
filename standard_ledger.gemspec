@@ -24,9 +24,9 @@ Gem::Specification.new do |spec|
   # old ">= 3.4" was an untested claim. Every consumer runs 4.0.x too.
   spec.required_ruby_version = ">= 4.0"
 
-  spec.add_dependency "railties", ">= 8.0"
-  spec.add_dependency "activerecord", ">= 8.0"
-  spec.add_dependency "activesupport", ">= 8.0"
+  spec.add_dependency "railties", ">= 8.1"
+  spec.add_dependency "activerecord", ">= 8.1"
+  spec.add_dependency "activesupport", ">= 8.1"
 
   spec.add_development_dependency "brakeman"
   spec.add_development_dependency "bundler-audit"

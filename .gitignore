@@ -8,7 +8,6 @@
 /pkg/
 /spec/reports/
 /tmp/
-/Gemfile.lock
 /.worktrees/
 /.claude/worktrees/
 .rspec_status

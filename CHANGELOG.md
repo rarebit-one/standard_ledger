@@ -6,6 +6,11 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Requires Rails 8.1** (`railties`, `activerecord`, `activesupport` `>= 8.1`,
+  was `>= 8.0`). Every consumer app runs 8.1; 8.0 was never exercised in CI.
+
 ## [0.7.0] - 2026-09-24
 
 The Phase 4 release. The removals the cleanup plan scheduled for it (the
