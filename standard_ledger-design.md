@@ -138,7 +138,10 @@ StandardLedger.refresh!(view_name, concurrently: nil) # true | false | :auto | n
   expression unique index, a refresh inside a transaction, and a missing view.
 - On success it emits `<prefix>.projection.refreshed` and returns a Result with
   `projections[:refreshed] = [{ view:, concurrently: <resolved Boolean> }]`.
-  If the SQL fails, it emits `<prefix>.projection.failed` and re-raises.
+  If the SQL fails, it emits `<prefix>.projection.failed`, reports the error via
+  `Rails.error.report(handled: false, severity: :error)` (since 0.7) and
+  re-raises. Rails' reporter skips an already-reported exception, so a host
+  rescue that reports again, or the job executor, doesn't double-report.
 
 The motivating caller is sidekick's `RefreshMaterializedViewsJob`. It tried
 `concurrently: true`, rescued `PG::ObjectNotInPrerequisiteState` (empty view)

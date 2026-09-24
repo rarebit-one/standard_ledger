@@ -129,14 +129,21 @@ with `concurrently: false` can pass `concurrently: :auto` instead.
 
 `refresh!` returns a success Result with
 `projections[:refreshed] = [{ view:, concurrently: }]` (the concurrency mode
-that was actually used). If the SQL fails, it emits `projection.failed` and
-re-raises so your job runner can retry. View names must be bare or
-`schema.view` identifiers. Anything else raises `ArgumentError`.
+that was actually used). If the SQL fails, it emits `projection.failed`,
+reports the error to `Rails.error` (`handled: false`, `severity: :error`,
+`context: { view:, concurrently: }`, `source: "standard_ledger"`), and
+re-raises so your job runner can retry. Since 0.7 you don't need a
+report-and-re-raise rescue around `refresh!` in your job. An existing one is
+harmless: Rails skips an exception object it has already reported, so the
+failure is reported once. Input errors (an invalid view name, an unknown
+`concurrently:`, `RefreshInsideTransaction`) are raised before any SQL runs
+and are not reported by the gem. View names must be bare or `schema.view`
+identifiers. Anything else raises `ArgumentError`.
 
 ## Installation
 
 ```ruby
-gem "standard_ledger", "~> 0.6"
+gem "standard_ledger", "~> 0.7"
 ```
 
 (Don't reintroduce a `git:` reference. It makes a bare `bundle install` a

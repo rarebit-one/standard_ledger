@@ -92,9 +92,16 @@ module StandardLedger
 
     # Refresh a host-owned materialized view. Issues
     # `REFRESH MATERIALIZED VIEW [CONCURRENTLY] <view_name>` against the
-    # active connection and emits `<prefix>.projection.refreshed` on success
-    # (or `<prefix>.projection.failed` on raise, before re-raising — the
-    # host's job runner needs to see the failure to drive its retry path).
+    # active connection and emits `<prefix>.projection.refreshed` on success.
+    # When the refresh SQL raises, it emits `<prefix>.projection.failed`,
+    # reports the error through `Rails.error` (`handled: false`,
+    # `severity: :error`, `context: { view:, concurrently: }`,
+    # `source: "standard_ledger"`) and re-raises, so the host's job runner
+    # still drives its retry path. Hosts don't need their own
+    # report-and-re-raise; Rails skips an exception it has already reported,
+    # so an existing one is harmless. Argument errors and
+    # `RefreshInsideTransaction` are programming errors raised before any
+    # SQL runs; they are not reported by the gem.
     #
     # @example scheduled job refreshing a list of views
     #   VIEWS.each { |view| StandardLedger.refresh!(view, concurrently: :auto) }
@@ -128,6 +135,23 @@ module StandardLedger
         success: true,
         projections: { refreshed: [ { view: view_name.to_s, concurrently: effective } ] }
       )
+    end
+
+    # Report +error+ through `Rails.error` (or `ActiveSupport.error_reporter`
+    # outside Rails) with `source: "standard_ledger"`. A reporter failure is
+    # swallowed so it can never mask the error being reported.
+    #
+    # @api private
+    def report_error(error, handled:, severity:, context:)
+      reporter =
+        if defined?(::Rails) && ::Rails.respond_to?(:error)
+          ::Rails.error
+        elsif ActiveSupport.respond_to?(:error_reporter)
+          ActiveSupport.error_reporter
+        end
+      reporter&.report(error, handled: handled, severity: severity, context: context, source: "standard_ledger")
+    rescue StandardError
+      nil
     end
 
     private

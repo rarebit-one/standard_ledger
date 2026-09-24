@@ -68,7 +68,7 @@ This is sugar over `create!`. `targets:` are assigned through `belongs_to` (an u
 
 ### `StandardLedger.refresh!(view, concurrently: nil | true | false | :auto)`
 
-`nil` reads `Config#matview_refresh_strategy` (`:concurrent`/`:blocking`/`:auto`). `true` raises `RefreshInsideTransaction` inside a transaction. `:auto` uses `CONCURRENTLY` only when no transaction is open, `pg_class.relispopulated` is true, and a valid unique index exists with no predicate or expressions. Otherwise it runs a plain refresh. A failing probe is reported via `Rails.error` (handled) and degrades to a plain refresh. It emits `projection.refreshed` / `projection.failed`, and SQL errors re-raise.
+`nil` reads `Config#matview_refresh_strategy` (`:concurrent`/`:blocking`/`:auto`). `true` raises `RefreshInsideTransaction` inside a transaction. `:auto` uses `CONCURRENTLY` only when no transaction is open, `pg_class.relispopulated` is true, and a valid unique index exists with no predicate or expressions. Otherwise it runs a plain refresh. A failing probe is reported via `Rails.error` (handled) and degrades to a plain refresh. It emits `projection.refreshed` / `projection.failed`. SQL errors are reported via `Rails.error` (`handled: false`, since 0.7) and re-raised; input errors are not reported.
 
 ### Result class + host interop
 

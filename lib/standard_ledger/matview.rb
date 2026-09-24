@@ -44,8 +44,15 @@ module StandardLedger
       end
 
       # Issue `REFRESH MATERIALIZED VIEW [CONCURRENTLY] <view_name>` and emit
-      # `<prefix>.projection.refreshed` on success, or
-      # `<prefix>.projection.failed` before re-raising on SQL failure.
+      # `<prefix>.projection.refreshed` on success. On SQL failure, emit
+      # `<prefix>.projection.failed`, report the error through `Rails.error`
+      # (`handled: false`, `severity: :error`) and re-raise.
+      #
+      # Reporting before the re-raise means host jobs no longer need their
+      # own report-and-re-raise rescue. It cannot double-report: Rails'
+      # ErrorReporter flags a reported exception and skips it when the same
+      # object is reported again (by a host rescue, or by the executor that
+      # wraps the job).
       #
       # The view name is validated against a SQL-identifier regex at the
       # boundary as defence in depth — a careless host could pass through a
@@ -71,6 +78,10 @@ module StandardLedger
           StandardLedger::EventEmitter.emit(
             "#{prefix}.projection.failed",
             view: view_name.to_s, concurrently: concurrently, mode: :matview, error: e
+          )
+          StandardLedger.report_error(
+            e, handled: false, severity: :error,
+            context: { view: view_name.to_s, concurrently: concurrently }
           )
           raise
         end
@@ -140,22 +151,12 @@ module StandardLedger
 
         boolean(row["populated"]) && boolean(row["unique_index"])
       rescue StandardError => e
-        report_error(e, view: view_name.to_s)
+        StandardLedger.report_error(e, handled: true, severity: :warning, context: { view: view_name.to_s })
         false
       end
 
       def boolean(value)
         ActiveModel::Type::Boolean.new.cast(value) == true
-      end
-
-      def report_error(error, context)
-        reporter =
-          if defined?(::Rails) && ::Rails.respond_to?(:error)
-            ::Rails.error
-          elsif ActiveSupport.respond_to?(:error_reporter)
-            ActiveSupport.error_reporter
-          end
-        reporter&.report(error, handled: true, severity: :warning, context: context, source: "standard_ledger")
       end
     end
   end
