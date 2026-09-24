@@ -156,6 +156,80 @@ RSpec.describe "StandardLedger.refresh!" do
     end
   end
 
+  describe "error reporting" do
+    # A real reporter with a recording subscriber, so the dedupe behaviour
+    # (ActiveSupport::ErrorReporter skips an exception it already reported)
+    # is exercised rather than stubbed.
+    let(:reports) { [] }
+    let(:reporter) do
+      recorded = reports
+      ActiveSupport::ErrorReporter.new.tap do |r|
+        r.subscribe(Class.new {
+          define_method(:report) { |error, handled:, severity:, context:, source:| recorded << { error:, handled:, severity:, context:, source: } }
+        }.new)
+      end
+    end
+
+    before { allow(ActiveSupport).to receive(:error_reporter).and_return(reporter) }
+
+    it "reports a failed refresh as unhandled, with view context, then re-raises" do
+      error = StandardError.new("kaboom")
+      allow(ActiveRecord::Base.connection).to receive(:execute).and_raise(error)
+
+      expect {
+        StandardLedger.refresh!("user_prompt_inventories", concurrently: true)
+      }.to raise_error(error)
+
+      expect(reports).to eq([
+        { error: error, handled: false, severity: :error,
+          context: { view: "user_prompt_inventories", concurrently: true }, source: "standard_ledger" }
+      ])
+    end
+
+    it "does not double-report when the host also reports the re-raised error" do
+      allow(ActiveRecord::Base.connection).to receive(:execute).and_raise(StandardError, "kaboom")
+
+      expect {
+        begin
+          StandardLedger.refresh!("user_prompt_inventories", concurrently: false)
+        rescue StandardError => e
+          reporter.report(e, handled: true, context: { view: "host" })
+          raise
+        end
+      }.to raise_error(StandardError, "kaboom")
+
+      expect(reports.size).to eq(1)
+      expect(reports.first[:source]).to eq("standard_ledger")
+    end
+
+    it "still re-raises the original error when the reporter itself raises" do
+      allow(ActiveSupport).to receive(:error_reporter).and_return(
+        instance_double(ActiveSupport::ErrorReporter).tap { |r| allow(r).to receive(:report).and_raise(RuntimeError, "reporter down") }
+      )
+      allow(ActiveRecord::Base.connection).to receive(:execute).and_raise(StandardError, "kaboom")
+
+      expect {
+        StandardLedger.refresh!("user_prompt_inventories", concurrently: false)
+      }.to raise_error(StandardError, "kaboom")
+    end
+
+    it "does not report programming errors raised before any SQL runs" do
+      expect { StandardLedger.refresh!("foo;bar", concurrently: false) }.to raise_error(ArgumentError)
+      ActiveRecord::Base.transaction do
+        expect {
+          StandardLedger.refresh!("user_prompt_inventories", concurrently: true)
+        }.to raise_error(StandardLedger::RefreshInsideTransaction)
+      end
+
+      expect(reports).to be_empty
+    end
+
+    it "reports nothing on success" do
+      StandardLedger.refresh!("user_prompt_inventories", concurrently: false)
+      expect(reports).to be_empty
+    end
+  end
+
   describe "transaction-state guard" do
     # Postgres rejects `REFRESH MATERIALIZED VIEW CONCURRENTLY` inside a
     # transaction block. The gem catches this at the boundary so callers

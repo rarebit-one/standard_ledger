@@ -6,6 +6,51 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-24
+
+The Phase 4 release. The removals the cleanup plan scheduled for it (the
+`scheduler` config, `PartialFailure`, and the engine's no-op initializer)
+already shipped in 0.6.0, and 0.6.0 deprecated nothing, so this release only
+changes how `refresh!` reports failures. It is a minor bump because hosts that
+report refresh failures themselves should delete that code.
+
+### Changed
+- **`StandardLedger.refresh!` reports SQL failures through `Rails.error`.**
+  When the `REFRESH` statement raises, the gem emits `projection.failed` (as
+  before), then calls `Rails.error.report(error, handled: false,
+  severity: :error, context: { view:, concurrently: }, source:
+  "standard_ledger")`, then re-raises. It falls back to
+  `ActiveSupport.error_reporter` outside Rails. A reporter that raises is
+  ignored, so it can never mask the refresh error. Input errors raised before
+  any SQL runs are not reported (`ArgumentError`, `RefreshInsideTransaction`).
+  **No double reports:** Rails' `ErrorReporter` flags a reported exception
+  and skips it when the same object is reported again. That covers a host
+  rescue that reports and re-raises, and the executor wrapping the job.
+- The `:auto` catalog-probe failure report (handled, `:warning`) now goes
+  through the same `StandardLedger.report_error` helper (`@api private`).
+  Its payload is unchanged.
+
+### Upgrade notes (0.6.x → 0.7.0)
+1. Bump to `gem "standard_ledger", "~> 0.7"`. Nothing was removed, so no code
+   change is required.
+2. **Optional cleanup:** delete any report-and-re-raise rescue around
+   `refresh!`. Grepped `origin/main` of all consumers on 2026-09-24:
+   - luminality-web `app/jobs/refresh_admin_dashboard_metrics_job.rb:20-27`
+     (`rescue StandardError => e; Rails.error.report(e, handled: true,
+     context: { view: "admin_dashboard_metrics" }); raise`). Delete the rescue
+     and fix the header comment ("…does not report").
+   - sidekick-web `app/jobs/refresh_materialized_views_job.rb` has no rescue.
+     Its refresh failures are now reported by the gem, with view context,
+     before the job runner sees them.
+   - jumpdrive-web and fundbright-web don't call `refresh!`.
+3. **Expect a different Sentry grouping context** for refresh failures:
+   `source: "standard_ledger"` and `context.view`. The error class and
+   backtrace are unchanged.
+4. Sorbet apps: regenerate the gem RBI (`bin/tapioca gem standard_ledger`).
+   jumpdrive-web's `control-plane/config/initializers/standard_ledger.rb:12-13`
+   still mentions the removed `scheduler`/`default_async_*` config in a
+   comment. The comment is historical and harmless.
+
 ## [0.6.0] - 2026-09-24
 
 A breaking release. The declarative projection engine is removed, and the gem
