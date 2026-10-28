@@ -250,6 +250,65 @@ RSpec.describe StandardLedger::Entry do
       )
       expect(lookup).to be_nil
     end
+
+    # Hosts post entries inside their own business transaction. On Postgres a
+    # failed INSERT aborts the enclosing transaction, so without a savepoint
+    # the rescue's find_by (and everything the caller does after it) raises
+    # PG::InFailedSqlTransaction. SQLite does not abort the transaction, so
+    # these examples only bite on the Postgres leg (DATABASE_URL).
+    context "when inside an outer transaction" do
+      it "returns the existing row on a duplicate" do
+        first = LedgerEntryModel.create!(organisation_id: "org-1", kind: "grant", idempotency_key: "txn")
+
+        second = nil
+        ActiveRecord::Base.transaction do
+          second = LedgerEntryModel.create!(organisation_id: "org-1", kind: "grant", idempotency_key: "txn")
+        end
+
+        expect(second.id).to eq(first.id)
+        expect(second.idempotent?).to be(true)
+      end
+
+      it "keeps the outer transaction usable and its own writes committed" do
+        LedgerEntryModel.create!(organisation_id: "org-1", kind: "grant", idempotency_key: "keep")
+
+        ActiveRecord::Base.transaction do
+          MutableEntryModel.create!(kind: "grant", payload: "before")
+          LedgerEntryModel.create!(organisation_id: "org-1", kind: "grant", idempotency_key: "keep")
+          MutableEntryModel.create!(kind: "grant", payload: "after")
+        end
+
+        expect(MutableEntryModel.where(payload: %w[before after]).count).to eq(2)
+      end
+
+      # Two connections racing the same key: the loser's INSERT waits on the
+      # winner's uncommitted row, then fails once the winner commits. In-memory
+      # SQLite gives each connection its own database, so Postgres only.
+      it "returns the winner's row to a transaction that loses a race", # rubocop:disable RSpec/ExampleLength
+         skip: (ActiveRecord::Base.connection.adapter_name.match?(/postg/i) ? false : "Postgres only") do
+        holding = Queue.new
+        release = Queue.new
+        winner = Thread.new do
+          ActiveRecord::Base.connection_pool.with_connection do
+            ActiveRecord::Base.transaction do
+              row = LedgerEntryModel.create!(organisation_id: "org-1", kind: "grant", idempotency_key: "race")
+              holding << true
+              release.pop
+              row
+            end
+          end
+        end
+
+        holding.pop
+        Thread.new { sleep 0.2; release << true }
+        loser = ActiveRecord::Base.transaction do
+          LedgerEntryModel.create!(organisation_id: "org-1", kind: "grant", idempotency_key: "race")
+        end
+
+        expect(loser.id).to eq(winner.value.id)
+        expect(loser.idempotent?).to be(true)
+      end
+    end
   end
 
   describe "boot-time index validation" do

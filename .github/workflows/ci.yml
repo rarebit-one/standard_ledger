@@ -18,3 +18,47 @@ jobs:
       extra-lint-commands: |
         bundle exec brakeman --no-pager --force
         bundle exec bundler-audit --update
+
+  # The suite again, against PostgreSQL. The dummy schema is in-memory SQLite,
+  # which does not abort a transaction when a statement fails, so it could not
+  # see that the idempotent create!'s RecordNotUnique rescue raised
+  # PG::InFailedSqlTransaction inside a host's transaction (DBP-022). Copied
+  # from standard_audit's `test (postgres)` job: the reusable gem CI has no
+  # `services:` hook, so this is a separate job on a GitHub-hosted runner.
+  test-postgres:
+    name: test (postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16-alpine@sha256:44c4ee9810eff91f7eab4d822642e01115b1a9eccce4bcbdde7604752d68eac6
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: standard_ledger_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          --mount type=tmpfs,destination=/var/lib/postgresql/data
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/standard_ledger_test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@26e5b7d197ebf60545ee9667bcbace0be11ccaec # v1.334.0
+        with:
+          ruby-version: 4.0.4
+          bundler-cache: true
+
+      - name: Run tests on PostgreSQL
+        run: bundle exec rspec
