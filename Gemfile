@@ -11,5 +11,7 @@ end
 
 group :test do
   gem "sqlite3", require: false
+  # The Postgres CI leg (DATABASE_URL); see spec/dummy/config/database.rb.
+  gem "pg", require: false
   gem "activerecord", ">= 8.1", require: false
 end

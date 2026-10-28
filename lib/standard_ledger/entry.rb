@@ -80,7 +80,13 @@ module StandardLedger
 
         validate_standard_ledger_idempotency_index!
 
-        super
+        # A savepoint, so a duplicate rolls back only this INSERT. Hosts post
+        # inside their own transaction, and on Postgres a failed statement
+        # aborts the whole transaction: without it the find_by below, and
+        # every later statement in the host's transaction, raises
+        # PG::InFailedSqlTransaction. With no outer transaction this is the
+        # same single transaction create! would open anyway.
+        transaction(requires_new: true) { super(attributes, &block) }
       rescue ActiveRecord::RecordNotUnique => e
         raise unless standard_ledger_idempotency_violation?(e)
 

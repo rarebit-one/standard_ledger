@@ -6,7 +6,21 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **An idempotent replay inside a host transaction no longer poisons it on
+  Postgres.** `create!` now inserts inside a savepoint
+  (`transaction(requires_new: true)`), so a duplicate idempotency key rolls back
+  only that INSERT. Before, the failed INSERT aborted the host's whole
+  transaction and the rescue's `find_by` raised `PG::InFailedSqlTransaction`,
+  as did every later statement in it. Covered by a deterministic duplicate and
+  a two-connection race on the new Postgres CI leg.
+
 ### Changed
+
+- **The suite also runs on PostgreSQL in CI** (`test (postgres)`). Set
+  `DATABASE_URL` to a database whose name contains `test` to run it locally;
+  the dummy schema is loaded with `force: true`.
 
 - **Requires Rails 8.1** (`railties`, `activerecord`, `activesupport` `>= 8.1`,
   was `>= 8.0`). Every consumer app runs 8.1; 8.0 was never exercised in CI.
