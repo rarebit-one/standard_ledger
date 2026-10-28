@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-28
+
 ### Fixed
 
 - **An idempotent replay inside a host transaction no longer poisons it on
