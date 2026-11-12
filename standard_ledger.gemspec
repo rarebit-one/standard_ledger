@@ -3,7 +3,7 @@ require_relative "lib/standard_ledger/version"
 Gem::Specification.new do |spec|
   spec.name        = "standard_ledger"
   spec.version     = StandardLedger::VERSION
-  spec.authors     = [ "Jaryl Sim" ]
+  spec.authors     = [ "Rarebit One" ]
   spec.email       = [ "code@jaryl.dev" ]
   spec.homepage    = "https://github.com/rarebit-one/standard_ledger"
   spec.summary     = "Immutable, append-only journal entries and materialized-view refresh for Rails apps."
