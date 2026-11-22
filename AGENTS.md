@@ -34,7 +34,7 @@ standard_ledger/
 │   ├── errors.rb         # Error, NotRebuildable, MissingIdempotencyIndex, RefreshInsideTransaction
 │   ├── event_emitter.rb  # Routes events to Rails.event.notify (Rails 8.1+) or ActiveSupport::Notifications
 │   ├── result.rb         # StandardLedger::Result (default return type)
-│   ├── config.rb         # matview_refresh_strategy, result_class/result_adapter, notification_namespace
+│   ├── config.rb         # matview_refresh_strategy, result_class/result_adapter, notification_namespace, error_reporter
 │   ├── entry.rb          # `include StandardLedger::Entry`: immutability + idempotency-by-unique-index
 │   ├── projection.rb     # Base class for host projectors (apply / rebuild); the gem never calls it
 │   ├── matview.rb        # REFRESH SQL, identifier validation, transaction guard, `concurrently: :auto` catalog probe (@api private)
@@ -68,7 +68,7 @@ This is sugar over `create!`. `targets:` are assigned through `belongs_to` (an u
 
 ### `StandardLedger.refresh!(view, concurrently: nil | true | false | :auto)`
 
-`nil` reads `Config#matview_refresh_strategy` (`:concurrent`/`:blocking`/`:auto`). `true` raises `RefreshInsideTransaction` inside a transaction. `:auto` uses `CONCURRENTLY` only when no transaction is open, `pg_class.relispopulated` is true, and a valid unique index exists with no predicate or expressions. Otherwise it runs a plain refresh. A failing probe is reported via `Rails.error` (handled) and degrades to a plain refresh. It emits `projection.refreshed` / `projection.failed`. SQL errors are reported via `Rails.error` (`handled: false`, since 0.7) and re-raised; input errors are not reported.
+`nil` reads `Config#matview_refresh_strategy` (`:concurrent`/`:blocking`/`:auto`). `true` raises `RefreshInsideTransaction` inside a transaction. `:auto` uses `CONCURRENTLY` only when no transaction is open, `pg_class.relispopulated` is true, and a valid unique index exists with no predicate or expressions. Otherwise it runs a plain refresh. A failing probe is reported via `Rails.error` (handled) and degrades to a plain refresh. It emits `projection.refreshed` / `projection.failed`. SQL errors are reported via `Rails.error` (`handled: false`, since 0.7) and re-raised; input errors are not reported. Both reports go through `StandardLedger.report_error`, which uses `Config#error_reporter` `(error, context)` when set; never call `Rails.error` directly.
 
 ### Result class + host interop
 

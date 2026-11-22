@@ -6,6 +6,18 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`Config#error_reporter`**: an optional callable `(error, context)` that
+  receives the errors the gem reports (a failed `refresh!`, re-raised after
+  reporting, and a failing `concurrently: :auto` catalog probe, handled). The
+  context is the site's Hash (`view:`, plus `concurrently:` for a failed
+  refresh) merged with `source: "standard_ledger"`, `handled:` and `severity:`.
+  nil (the default) keeps the existing `Rails.error.report` /
+  `ActiveSupport.error_reporter` behaviour unchanged. Both sites already went
+  through `StandardLedger.report_error`, which now checks the setting first.
+  A raising reporter is still swallowed and never masks the original error.
+
 ## [0.8.0] - 2026-10-28
 
 ### Fixed

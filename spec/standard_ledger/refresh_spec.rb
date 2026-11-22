@@ -228,6 +228,40 @@ RSpec.describe "StandardLedger.refresh!" do
       StandardLedger.refresh!("user_prompt_inventories", concurrently: false)
       expect(reports).to be_empty
     end
+
+    context "with Config#error_reporter set" do
+      let(:custom_reports) { [] }
+
+      before do
+        StandardLedger.configure { |c| c.error_reporter = ->(error, context) { custom_reports << [ error, context ] } }
+      end
+
+      after { StandardLedger.reset! }
+
+      it "sends a failed refresh to it instead of the Rails reporter, then re-raises" do
+        error = StandardError.new("kaboom")
+        allow(ActiveRecord::Base.connection).to receive(:execute).and_raise(error)
+
+        expect {
+          StandardLedger.refresh!("user_prompt_inventories", concurrently: true)
+        }.to raise_error(error)
+
+        expect(custom_reports).to eq([
+          [ error, { view: "user_prompt_inventories", concurrently: true,
+                     source: "standard_ledger", handled: false, severity: :error } ]
+        ])
+        expect(reports).to be_empty
+      end
+
+      it "still re-raises the original error when it raises" do
+        StandardLedger.configure { |c| c.error_reporter = ->(_error, _context) { raise "tracker down" } }
+        allow(ActiveRecord::Base.connection).to receive(:execute).and_raise(StandardError, "kaboom")
+
+        expect {
+          StandardLedger.refresh!("user_prompt_inventories", concurrently: false)
+        }.to raise_error(StandardError, "kaboom")
+      end
+    end
   end
 
   describe "transaction-state guard" do
@@ -343,6 +377,24 @@ RSpec.describe "StandardLedger.refresh!" do
         probe_error,
         hash_including(handled: true, context: { view: "user_prompt_inventories" }, source: "standard_ledger")
       )
+    end
+
+    it "sends a failing probe to Config#error_reporter when set" do
+      custom_reports = []
+      StandardLedger.configure { |c| c.error_reporter = ->(error, context) { custom_reports << [ error, context ] } }
+      probe_error = StandardError.new("catalog unavailable")
+      allow(connection).to receive(:select_one).and_raise(probe_error)
+      allow(ActiveSupport.error_reporter).to receive(:report)
+
+      StandardLedger.refresh!("user_prompt_inventories", concurrently: :auto)
+
+      expect(executed_sql).to eq([ "REFRESH MATERIALIZED VIEW user_prompt_inventories" ])
+      expect(custom_reports).to eq([
+        [ probe_error, { view: "user_prompt_inventories", source: "standard_ledger", handled: true, severity: :warning } ]
+      ])
+      expect(ActiveSupport.error_reporter).not_to have_received(:report)
+    ensure
+      StandardLedger.reset!
     end
 
     it "prefers Rails.error when Rails is loaded" do

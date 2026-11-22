@@ -137,12 +137,18 @@ module StandardLedger
       )
     end
 
-    # Report +error+ through `Rails.error` (or `ActiveSupport.error_reporter`
-    # outside Rails) with `source: "standard_ledger"`. A reporter failure is
-    # swallowed so it can never mask the error being reported.
+    # Report +error+ through `Config#error_reporter` when set, otherwise
+    # `Rails.error` (or `ActiveSupport.error_reporter` outside Rails) with
+    # `source: "standard_ledger"`. A reporter failure is swallowed so it can
+    # never mask the error being reported.
     #
     # @api private
     def report_error(error, handled:, severity:, context:)
+      if (custom = config.error_reporter)
+        custom.call(error, { **context, source: "standard_ledger", handled: handled, severity: severity })
+        return
+      end
+
       reporter =
         if defined?(::Rails) && ::Rails.respond_to?(:error)
           ::Rails.error

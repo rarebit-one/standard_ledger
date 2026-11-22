@@ -13,6 +13,10 @@ RSpec.describe StandardLedger::Config do
       end
     end
 
+    it "leaves error_reporter unset, meaning the Rails error reporter" do
+      expect(config.error_reporter).to be_nil
+    end
+
     it "leaves result interop unset by default" do
       expect(config.result_class).to be_nil
       expect(config.result_adapter).to be_nil
