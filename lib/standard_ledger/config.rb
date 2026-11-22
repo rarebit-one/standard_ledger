@@ -32,11 +32,32 @@ module StandardLedger
     # `<prefix>.projection.failed`.
     attr_accessor :notification_namespace
 
+    # Optional: where the gem sends the errors it reports — a failed
+    # `refresh!` (re-raised after reporting) and a failing `:auto` catalog
+    # probe (handled; the refresh runs plain). A callable taking
+    # `(error, context)`. `context` is the site's Hash (`view:`, plus
+    # `concurrently:` for a failed refresh) merged with
+    # `source: "standard_ledger"`, `handled:` and `severity:`, so a reporter
+    # can tell the re-raised refresh error from the handled probe failure.
+    #
+    # nil (the default) means `Rails.error.report` (or
+    # `ActiveSupport.error_reporter` outside Rails) with `handled:`,
+    # `severity:` and `source: "standard_ledger"` as keywords:
+    #
+    #   c.error_reporter = ->(error, context) { Sentry.capture_exception(error, extra: context) }
+    #
+    # It replaces the Rails.error call. Rails.error's dedupe (it skips an
+    # exception it has already reported) does not apply to a custom reporter,
+    # so a host that also reports the re-raised refresh error sees it twice.
+    # A reporter that raises is swallowed and never masks the original error.
+    attr_accessor :error_reporter
+
     def initialize
       @matview_refresh_strategy = :concurrent
       @result_class             = nil
       @result_adapter           = nil
       @notification_namespace   = "standard_ledger"
+      @error_reporter           = nil
     end
 
     # True when the host has wired up its own Result type. When false, the gem

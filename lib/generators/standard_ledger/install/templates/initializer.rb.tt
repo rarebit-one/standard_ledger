@@ -33,6 +33,15 @@ StandardLedger.configure do |c|
   # c.notification_namespace = "standard_ledger"
 
   # ---------------------------------------------------------------------------
+  # Error reporting
+  # ---------------------------------------------------------------------------
+
+  # Where a failed refresh! (re-raised) and a failing :auto catalog probe
+  # (handled) are reported. Default nil: Rails.error.report. The context Hash
+  # carries the site's keys plus source:, handled: and severity:.
+  # c.error_reporter = ->(error, context) { Sentry.capture_exception(error, extra: context) }
+
+  # ---------------------------------------------------------------------------
   # Host Result interop
   # ---------------------------------------------------------------------------
   # Optional: return the host's Result type from StandardLedger.post.

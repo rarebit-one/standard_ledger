@@ -142,6 +142,10 @@ StandardLedger.refresh!(view_name, concurrently: nil) # true | false | :auto | n
   `Rails.error.report(handled: false, severity: :error)` (since 0.7) and
   re-raises. Rails' reporter skips an already-reported exception, so a host
   rescue that reports again, or the job executor, doesn't double-report.
+- Both reports go through `StandardLedger.report_error`, which calls
+  `Config#error_reporter` `(error, context)` instead when it is set (since
+  Unreleased), passing the site's context merged with `source:`, `handled:` and
+  `severity:`.
 
 The motivating caller is sidekick's `RefreshMaterializedViewsJob`. It tried
 `concurrently: true`, rescued `PG::ObjectNotInPrerequisiteState` (empty view)

@@ -140,6 +140,21 @@ failure is reported once. Input errors (an invalid view name, an unknown
 and are not reported by the gem. View names must be bare or `schema.view`
 identifiers. Anything else raises `ArgumentError`.
 
+Both reports go to `Config#error_reporter` instead when it is set, a callable
+taking `(error, context)`. The context is the site's Hash merged with
+`source: "standard_ledger"`, `handled:` and `severity:`, so the reporter can
+tell the re-raised refresh failure from the handled probe failure:
+
+```ruby
+StandardLedger.configure do |c|
+  c.error_reporter = ->(error, context) { Sentry.capture_exception(error, extra: context) }
+end
+```
+
+It replaces the `Rails.error` call. Rails' dedupe does not apply to a custom
+reporter, so keep no report-and-re-raise rescue of your own around `refresh!`.
+A reporter that raises is swallowed and never masks the original error.
+
 ## Installation
 
 ```ruby
